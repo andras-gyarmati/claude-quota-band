@@ -1,9 +1,28 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Limit } from '../types'
+import type { Limit, Turn } from '../types'
 
 const limits = atom({ plugin: 'quota-band', key: 'limits' } as const, [] as Limit[])
+const turn = atom({ plugin: 'quota-band', key: 'turn' } as const, null as Turn | null)
+const tick = atom({ plugin: 'quota-band', key: 'tick' } as const, 0)
+
+const HOUR = 3600e3
+const COLD_SOON = 5 * 60e3
+
+/** Subscribers' main thread caches for an hour, everyone else for five
+ * minutes, unless `promptCacheTtl` says otherwise. */
+async function cacheTtl($: any, subscriber: boolean): Promise<number> {
+  const setting = (await $.settings.read())?.promptCacheTtl
+  if (setting === '1h') return HOUR
+  if (setting === '5m') return 5 * 60e3
+  return subscriber ? HOUR : 5 * 60e3
+}
+
+function tokensText(tokens: number | null): string {
+  if (tokens === null) return ''
+  return tokens >= 1e6 ? `${(tokens / 1e6).toFixed(1)}M` : `${Math.round(tokens / 1e3)}k`
+}
 
 const windowMs: Record<string, number> = { five_hour: 5 * 3600e3, seven_day: 7 * 86400e3 }
 const labels: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'spend' }
@@ -76,26 +95,55 @@ function bar(limit: Limit, now: number, width: number, height: number): string {
   return svg + `</svg>`
 }
 
-export const register: Register = on => {
+type Options = { closeCommand?: string; renamePrompt?: string }
+
+export const register: Register = (on, options: Options = {}) => {
+  let warned = 0
+
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     const usage = await $.session.usage()
     if (usage.rateLimits.length > 0) await update($, limits, () => usage.rateLimits)
+    $.clock.every(60e3, () => {
+      update($, tick, n => n + 1)
+      read($, turn).then(last => {
+        if (!last) return
+        const left = last.at + last.ttlMs - Date.now()
+        if (left > 0 && left <= COLD_SOON && warned !== last.at) {
+          warned = last.at
+          $.ui.toast(`Prompt cache goes cold in ${Math.ceil(left / 60e3)} min · ${tokensText(last.tokens)} to rebuild`)
+        }
+      })
+    })
     return result
   })
 
   on('session.measure', async ($, e, next) => {
     if (e.rateLimits.length > 0) await update($, limits, () => e.rateLimits)
+    const ttlMs = await cacheTtl($, e.rateLimits.length > 0)
+    const at = await $.clock.now()
+    await update($, turn, () => ({ at, tokens: e.context.tokens ?? null, ttlMs }))
     return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const shown = await read($, limits)
-    if (e.props.hasSurvey || shown.length === 0) return next(e)
+    const last = await read($, turn)
+    await read($, tick)
+    if (e.props.hasSurvey || (shown.length === 0 && !last)) return next(e)
     const now = await $.clock.now()
     const ui = $.ui.resolve(e)
-    const { Box, Text } = ui
+    const { Box, Text, Button } = ui
+    const left = last ? last.at + last.ttlMs - now : null
+    const cache = left === null ? null
+      : left > 0 ? { text: `cache ${Math.ceil(left / 60e3)}m`, color: left <= COLD_SOON ? '#ff8c00' : undefined }
+      : { text: 'cache cold', color: '#ff453a' }
+    const buttons = e.props.isWorking ? [] : [
+      options.closeCommand ? { key: 'close', label: 'close', text: options.closeCommand } : null,
+      options.renamePrompt ? { key: 'rename', label: 'rename', text: options.renamePrompt } : null,
+    ].filter(Boolean) as { key: string; label: string; text: string }[]
     const line = shown.map(l => `${labels[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}%` + (l.resetsAt ? ` · ${resetText(l, now)}` : '')).join('   ')
+      + (cache ? `   ${cache.text}` + (last?.tokens ? ` · ${tokensText(last.tokens)}` : '') : '')
     if (e.surface !== 'desktop' || !('Svg' in ui)) return <Text dimColor>{line}</Text>
     const { Svg } = ui as any
 
@@ -109,6 +157,15 @@ export const register: Register = on => {
             {projected(l, now) !== null && projected(l, now)! > Math.round(l.percentUsed) ? <Text dimColor>→ {projected(l, now)}%</Text> : null}
             {l.resetsAt ? <Text dimColor>{resetText(l, now)}</Text> : null}
           </Box>
+        ))}
+        {cache ? (
+          <Box flexDirection="row" alignItems="center" columnGap={1}>
+            <Text color={cache.color} dimColor={!cache.color}>{cache.text}</Text>
+            {last?.tokens ? <Text dimColor>{tokensText(last.tokens)}</Text> : null}
+          </Box>
+        ) : null}
+        {buttons.map(b => (
+          <Button key={b.key} label={b.label} onPress={() => { $.prompt.submit({ text: b.text, asUser: true }) }} />
         ))}
       </Box>
     )

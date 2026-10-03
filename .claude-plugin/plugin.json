@@ -1,8 +1,25 @@
 {
   "name": "quota-band",
-  "version": "0.1.0",
-  "description": "Your Claude plan's 5h and weekly usage as one line of bars above the prompt",
-  "author": { "name": "Andras Gyarmati", "url": "https://github.com/andras-gyarmati" },
+  "version": "0.2.0",
+  "description": "Your Claude plan's 5h and weekly usage and the prompt cache's time left, as one line above the prompt",
+  "author": {
+    "name": "Andras Gyarmati",
+    "url": "https://github.com/andras-gyarmati"
+  },
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "closeCommand": {
+      "type": "string",
+      "title": "Close button",
+      "description": "Prompt sent by a 'close' button, such as a wrap-up skill; empty hides the button",
+      "default": ""
+    },
+    "renamePrompt": {
+      "type": "string",
+      "title": "Rename button",
+      "description": "Prompt sent by a 'rename' button; empty hides the button",
+      "default": ""
+    }
+  }
 }
