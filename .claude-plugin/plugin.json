@@ -1,0 +1,8 @@
+{
+  "name": "quota-band",
+  "version": "0.1.0",
+  "description": "Your Claude plan's 5h and weekly usage as one line of bars above the prompt",
+  "author": { "name": "Andras Gyarmati", "url": "https://github.com/andras-gyarmati" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

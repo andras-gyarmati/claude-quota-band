@@ -1,0 +1,15 @@
+{
+  "name": "claude-quota-band",
+  "description": "Claude Code mods by Andras Gyarmati",
+  "owner": {
+    "name": "Andras Gyarmati",
+    "url": "https://github.com/andras-gyarmati"
+  },
+  "plugins": [
+    {
+      "name": "quota-band",
+      "source": "./",
+      "description": "Your Claude plan's 5h and weekly usage as one line of bars above the prompt"
+    }
+  ]
+}
