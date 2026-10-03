@@ -1,16 +1,17 @@
 # quota-band
 
-A Claude Code mod that keeps your plan's usage in view: one line above the prompt with the 5-hour and weekly windows and the prompt cache's time left.
+A Claude Code mod that keeps your plan's usage in view: one line above the prompt with the 5-hour and weekly windows, the context window and the prompt cache's time left.
 
 ```
-5h ▬▬▬▬▬▬▬▬▬ 93% → 100% 23:10    7d ▬▬▬▬▬▬▬ 72% 11:00    cache 42m 370k
+5h ▬▬▬▬▬▬▬▬▬ 93% → 100% 23:10    7d ▬▬▬▬▬▬▬ 72% 11:00    ctx ▬▬▬ 37% 370k    cache ▬▬▬ 42m
 ```
 
 - Each bar fills with the percent used. A grey tick marks how much of the window has passed, and the notches are hours (5h) or days (7d).
 - Colours: red from 95%, orange from 80%, yellow while you are ahead of an even pace, white otherwise.
 - `→ N%` is where the current pace lands by the reset, with a dashed outline on the bar.
 - The time is when the window resets.
-- `cache 42m` is how long the prompt cache stays warm after the last response: an hour on a subscription's main thread, five minutes otherwise, or what `promptCacheTtl` sets. `370k` is the context the next request re-sends, which a cold cache has to write again. It turns orange in the last five minutes, with a toast, and red once cold.
+- `ctx` is how full the context window is; `370k` is what the next request re-sends, which a cold cache has to write again.
+- `cache` drains over the time the prompt cache stays warm after the last response: an hour on a subscription's main thread, five minutes otherwise, or what `promptCacheTtl` sets. It turns orange in the last five minutes, with a toast, and red once cold.
 
 ## Buttons
 
@@ -24,7 +25,7 @@ Two optional buttons send a prompt of your choice, for example a wrap-up skill. 
 }
 ```
 
-Empty hides a button. They hide while a turn runs.
+Empty hides a button. A press during a turn waits until the turn ends.
 
 It reads the figures Claude Code already receives with each response (`session.measure`), so it sends no requests of its own and reads or writes no files. The figures appear after the first response of a session, on Pro, Max and Team plans.
 

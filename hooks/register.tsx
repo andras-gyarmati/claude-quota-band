@@ -97,6 +97,14 @@ function bar(limit: Limit, now: number, width: number, height: number): string {
 
 type Options = { closeCommand?: string; renamePrompt?: string }
 
+/** A plain filled bar for a share of 0 to 1. */
+function meter(share: number, color: string, width: number, height: number): string {
+  const fill = (Math.min(Math.max(share, 0), 1) * width).toFixed(1)
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
+    + `<rect width="${width}" height="${height}" rx="2" fill="#000" fill-opacity="0.4"/>`
+    + `<rect width="${fill}" height="${height}" rx="2" fill="${color}"/></svg>`
+}
+
 export const register: Register = (on, options: Options = {}) => {
   let warned = 0
 
@@ -122,7 +130,7 @@ export const register: Register = (on, options: Options = {}) => {
     if (e.rateLimits.length > 0) await update($, limits, () => e.rateLimits)
     const ttlMs = await cacheTtl($, e.rateLimits.length > 0)
     const at = await $.clock.now()
-    await update($, turn, () => ({ at, tokens: e.context.tokens ?? null, ttlMs }))
+    await update($, turn, () => ({ at, tokens: e.context.tokens ?? null, window: e.context.window ?? null, ttlMs }))
     return next(e)
   })
 
@@ -135,15 +143,17 @@ export const register: Register = (on, options: Options = {}) => {
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const left = last ? last.at + last.ttlMs - now : null
-    const cache = left === null ? null
-      : left > 0 ? { text: `cache ${Math.ceil(left / 60e3)}m`, color: left <= COLD_SOON ? '#ff8c00' : undefined }
-      : { text: 'cache cold', color: '#ff453a' }
-    const buttons = e.props.isWorking ? [] : [
-      options.closeCommand ? { key: 'close', label: 'close', text: options.closeCommand } : null,
-      options.renamePrompt ? { key: 'rename', label: 'rename', text: options.renamePrompt } : null,
+    const cache = left === null || !last ? null
+      : left > 0 ? { text: `${Math.ceil(left / 60e3)}m`, share: left / last.ttlMs, color: left <= COLD_SOON ? '#ff8c00' : '#f5f5f7' }
+      : { text: 'cold', share: 0, color: '#ff453a' }
+    const context = last?.tokens && last.window ? { share: last.tokens / last.window, percent: Math.round((last.tokens / last.window) * 100) } : null
+    const buttons = [
+      options.closeCommand ? { key: 'close', label: 'close', text: String(options.closeCommand) } : null,
+      options.renamePrompt ? { key: 'rename', label: 'rename', text: String(options.renamePrompt) } : null,
     ].filter(Boolean) as { key: string; label: string; text: string }[]
     const line = shown.map(l => `${labels[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}%` + (l.resetsAt ? ` · ${resetText(l, now)}` : '')).join('   ')
-      + (cache ? `   ${cache.text}` + (last?.tokens ? ` · ${tokensText(last.tokens)}` : '') : '')
+      + (context ? `   ctx ${context.percent}% · ${tokensText(last!.tokens)}` : '')
+      + (cache ? `   cache ${cache.text}` : '')
     if (e.surface !== 'desktop' || !('Svg' in ui)) return <Text dimColor>{line}</Text>
     const { Svg } = ui as any
 
@@ -158,10 +168,19 @@ export const register: Register = (on, options: Options = {}) => {
             {l.resetsAt ? <Text dimColor>{resetText(l, now)}</Text> : null}
           </Box>
         ))}
+        {context ? (
+          <Box flexDirection="row" alignItems="center" columnGap={1}>
+            <Text dimColor>ctx</Text>
+            <Svg source={meter(context.share, tint(context.percent, null), 60, 8)} alt={`context ${context.percent}%`} width={60} height={8} />
+            <Text>{context.percent}%</Text>
+            <Text dimColor>{tokensText(last!.tokens)}</Text>
+          </Box>
+        ) : null}
         {cache ? (
           <Box flexDirection="row" alignItems="center" columnGap={1}>
-            <Text color={cache.color} dimColor={!cache.color}>{cache.text}</Text>
-            {last?.tokens ? <Text dimColor>{tokensText(last.tokens)}</Text> : null}
+            <Text dimColor>cache</Text>
+            <Svg source={meter(cache.share, cache.color, 60, 8)} alt={`cache ${cache.text}`} width={60} height={8} />
+            <Text color={cache.color === '#f5f5f7' ? undefined : cache.color}>{cache.text}</Text>
           </Box>
         ) : null}
         {buttons.map(b => (

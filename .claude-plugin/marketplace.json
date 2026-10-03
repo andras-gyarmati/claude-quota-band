@@ -9,7 +9,7 @@
     {
       "name": "quota-band",
       "source": "./",
-      "description": "Your Claude plan's 5h and weekly usage and the prompt cache's time left, as one line above the prompt"
+      "description": "Your Claude plan's 5h and weekly usage, the context window and the prompt cache's time left, as one line of bars above the prompt"
     }
   ]
 }

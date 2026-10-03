@@ -1,6 +1,6 @@
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
-export type Turn = { at: number; tokens: number | null; ttlMs: number }
+export type Turn = { at: number; tokens: number | null; window: number | null; ttlMs: number }
 
 declare module 'claude-code' {
   interface PluginState {
