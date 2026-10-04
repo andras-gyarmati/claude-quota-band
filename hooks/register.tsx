@@ -8,15 +8,37 @@ const turn = atom({ plugin: 'quota-band', key: 'turn' } as const, null as Turn |
 const tick = atom({ plugin: 'quota-band', key: 'tick' } as const, 0)
 
 const HOUR = 3600e3
-const COLD_SOON = 5 * 60e3
+const FIVE_MINUTES = 5 * 60e3
+const COLD_SOON = FIVE_MINUTES
+const TRANSCRIPT_TAIL_BYTES = '524288'
 
-/** Subscribers' main thread caches for an hour, everyone else for five
- * minutes, unless `promptCacheTtl` says otherwise. */
+/** The fallback before a transcript has been read: subscribers' main thread
+ * caches for an hour, everyone else for five minutes, unless `promptCacheTtl`
+ * says otherwise. */
 async function cacheTtl($: any, subscriber: boolean): Promise<number> {
   const setting = (await $.settings.read())?.promptCacheTtl
   if (setting === '1h') return HOUR
-  if (setting === '5m') return 5 * 60e3
-  return subscriber ? HOUR : 5 * 60e3
+  if (setting === '5m') return FIVE_MINUTES
+  return subscriber ? HOUR : FIVE_MINUTES
+}
+
+/** The cache lifetime the last response actually wrote, which drops to five
+ * minutes in overage. `$.fs.read` stops at 4 MiB, so the transcript's tail
+ * comes from `tail`; null where that cannot be read. */
+async function writtenTtl($: any, transcriptPath: string | undefined): Promise<number | null> {
+  if (!transcriptPath) return null
+  const tail = await $.process.run(['/usr/bin/tail', '-c', TRANSCRIPT_TAIL_BYTES, transcriptPath]).catch(() => null)
+  if (!tail || tail.exitCode !== 0) return null
+  const lines: string[] = tail.stdout.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"cache_creation"')) continue
+    try {
+      const creation = JSON.parse(lines[i])?.message?.usage?.cache_creation
+      if (creation?.ephemeral_1h_input_tokens) return HOUR
+      if (creation?.ephemeral_5m_input_tokens) return FIVE_MINUTES
+    } catch {}
+  }
+  return null
 }
 
 function tokensText(tokens: number | null): string {
@@ -107,6 +129,7 @@ function meter(share: number, color: string, width: number, height: number): str
 
 export const register: Register = (on, options: Options = {}) => {
   let warned = 0
+  let observedTtl: number | null = null
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -128,10 +151,20 @@ export const register: Register = (on, options: Options = {}) => {
 
   on('session.measure', async ($, e, next) => {
     if (e.rateLimits.length > 0) await update($, limits, () => e.rateLimits)
-    const ttlMs = await cacheTtl($, e.rateLimits.length > 0)
+    const ttlMs = observedTtl ?? await cacheTtl($, e.rateLimits.length > 0)
     const at = await $.clock.now()
     await update($, turn, () => ({ at, tokens: e.context.tokens ?? null, window: e.context.window ?? null, ttlMs }))
     return next(e)
+  })
+
+  on('classic.Stop', async ($, e, next) => {
+    const result = await next(e)
+    const ttlMs = await writtenTtl($, (e as any).transcript_path)
+    if (ttlMs !== null) {
+      observedTtl = ttlMs
+      await update($, turn, last => (last ? { ...last, ttlMs } : last))
+    }
+    return result
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

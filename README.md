@@ -11,7 +11,7 @@ A Claude Code mod that keeps your plan's usage in view: one line above the promp
 - `→ N%` is where the current pace lands by the reset, with a dashed outline on the bar.
 - The time is when the window resets.
 - `ctx` is how full the context window is; `370k` is what the next request re-sends, which a cold cache has to write again.
-- `cache` drains over the time the prompt cache stays warm after the last response: an hour on a subscription's main thread, five minutes otherwise, or what `promptCacheTtl` sets. It turns orange in the last five minutes, with a toast, and red once cold.
+- `cache` drains over the time the prompt cache stays warm after the last response: the length the last response actually wrote, read from the transcript at the end of each turn, so it drops to five minutes in overage. Until the first turn ends (and on Windows, which has no `tail`) it assumes an hour on a subscription's main thread, five minutes otherwise, or what `promptCacheTtl` sets. It turns orange in the last five minutes, with a toast, and red once cold.
 
 ## Buttons
 
