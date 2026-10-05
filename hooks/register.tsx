@@ -5,6 +5,7 @@ import type { Limit, Turn } from '../types'
 
 const limits = atom({ plugin: 'quota-band', key: 'limits' } as const, [] as Limit[])
 const turn = atom({ plugin: 'quota-band', key: 'turn' } as const, null as Turn | null)
+const multiplier = atom({ plugin: 'quota-band', key: 'multiplier' } as const, null as number | null)
 const tick = atom({ plugin: 'quota-band', key: 'tick' } as const, 0)
 
 const HOUR = 3600e3
@@ -22,14 +23,16 @@ async function cacheTtl($: any, subscriber: boolean): Promise<number> {
   return subscriber ? HOUR : FIVE_MINUTES
 }
 
+/** `$.fs.read` stops at 4 MiB, so transcript ends come from `head` and `tail`;
+ * null where that cannot be read. */
+async function transcriptEnd($: any, tool: 'head' | 'tail', transcriptPath: string): Promise<string[] | null> {
+  const run = await $.process.run([`/usr/bin/${tool}`, '-c', TRANSCRIPT_TAIL_BYTES, transcriptPath]).catch(() => null)
+  return run && run.exitCode === 0 ? run.stdout.split('\n') : null
+}
+
 /** The cache lifetime the last response actually wrote, which drops to five
- * minutes in overage. `$.fs.read` stops at 4 MiB, so the transcript's tail
- * comes from `tail`; null where that cannot be read. */
-async function writtenTtl($: any, transcriptPath: string | undefined): Promise<number | null> {
-  if (!transcriptPath) return null
-  const tail = await $.process.run(['/usr/bin/tail', '-c', TRANSCRIPT_TAIL_BYTES, transcriptPath]).catch(() => null)
-  if (!tail || tail.exitCode !== 0) return null
-  const lines: string[] = tail.stdout.split('\n')
+ * minutes in overage. */
+function writtenTtl(lines: string[]): number | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!lines[i].includes('"cache_creation"')) continue
     try {
@@ -39,6 +42,81 @@ async function writtenTtl($: any, transcriptPath: string | undefined): Promise<n
     } catch {}
   }
   return null
+}
+
+type Usage = {
+  input_tokens?: number
+  cache_creation_input_tokens?: number
+  cache_read_input_tokens?: number
+  output_tokens?: number
+  cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number }
+}
+
+/** API prices relative to uncached input. How the plan's quotas weigh token
+ * kinds is not published, so the multiplier assumes the same ratios. */
+const READ_RATE = 0.1
+const WRITE_5M_RATE = 1.25
+const WRITE_1H_RATE = 2
+const OUTPUT_RATE = 5
+
+const sentTokens = (u: Usage) => (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
+
+function writeRate(u: Usage): number {
+  const hour = u.cache_creation?.ephemeral_1h_input_tokens ?? 0
+  const five = u.cache_creation?.ephemeral_5m_input_tokens ?? 0
+  return hour + five > 0 ? (hour * WRITE_1H_RATE + five * WRITE_5M_RATE) / (hour + five) : WRITE_5M_RATE
+}
+
+function cost(u: Usage): number {
+  return (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) * writeRate(u)
+    + (u.cache_read_input_tokens ?? 0) * READ_RATE + (u.output_tokens ?? 0) * OUTPUT_RATE
+}
+
+/** What resending `old` tokens of earlier context cost this request: read from
+ * the cache first, then written to it, then sent uncached. */
+function carried(u: Usage, old: number): number {
+  const read = Math.min(old, u.cache_read_input_tokens ?? 0)
+  const written = Math.min(old - read, u.cache_creation_input_tokens ?? 0)
+  return read * READ_RATE + written * writeRate(u) + (old - read - written)
+}
+
+type Entry = { type?: string; isMeta?: boolean; isSidechain?: boolean; message?: { id?: string; content?: unknown; usage?: Usage } }
+
+const parse = (line: string): Entry | null => { try { return JSON.parse(line) } catch { return null } }
+
+const isPrompt = (e: Entry) => e.type === 'user' && !e.isMeta && !e.isSidechain
+  && !(Array.isArray(e.message?.content) && e.message!.content.some((b: any) => b?.type === 'tool_result'))
+
+/** Context the session's first request sent: system prompt, tools, rules and
+ * the first prompt, the floor a fresh thread starts from. */
+function baselineTokens(head: string[]): number | null {
+  for (const line of head) {
+    if (!line.includes('"usage"')) continue
+    const e = parse(line)
+    if (e?.type === 'assistant' && !e.isSidechain && e.message?.usage) return sentTokens(e.message.usage)
+  }
+  return null
+}
+
+/** The last turn's cost over what the same turn costs on a fresh thread: every
+ * request in it resends the context the turn started with beyond `baseline`. */
+function turnMultiplier(tail: string[], baseline: number): number | null {
+  const seen = new Set<string>()
+  const usages: Usage[] = []
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const e = parse(tail[i])
+    if (!e || e.isSidechain) continue
+    if (isPrompt(e)) break
+    const id = e.message?.id
+    if (e.type !== 'assistant' || !e.message?.usage || !id || seen.has(id)) continue
+    seen.add(id)
+    usages.push(e.message.usage)
+  }
+  if (usages.length === 0) return null
+  const old = Math.max(0, sentTokens(usages[usages.length - 1]) - baseline)
+  const actual = usages.reduce((sum, u) => sum + cost(u), 0)
+  const fresh = usages.reduce((sum, u) => sum + cost(u) - carried(u, old), 0)
+  return fresh > 0 ? actual / fresh : null
 }
 
 function tokensText(tokens: number | null): string {
@@ -130,6 +208,7 @@ function meter(share: number, color: string, width: number, height: number): str
 export const register: Register = (on, options: Options = {}) => {
   let warned = 0
   let observedTtl: number | null = null
+  let baseline: { path: string; tokens: number } | null = null
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -159,10 +238,23 @@ export const register: Register = (on, options: Options = {}) => {
 
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
-    const ttlMs = await writtenTtl($, (e as any).transcript_path)
+    const path: string | undefined = (e as any).transcript_path
+    if (!path) return result
+    const tail = await transcriptEnd($, 'tail', path)
+    if (!tail) return result
+    const ttlMs = writtenTtl(tail)
     if (ttlMs !== null) {
       observedTtl = ttlMs
       await update($, turn, last => (last ? { ...last, ttlMs } : last))
+    }
+    if (baseline?.path !== path) {
+      const head = await transcriptEnd($, 'head', path)
+      const tokens = head ? baselineTokens(head) : null
+      baseline = tokens === null ? null : { path, tokens }
+    }
+    if (baseline) {
+      const value = turnMultiplier(tail, baseline.tokens)
+      await update($, multiplier, () => value)
     }
     return result
   })
@@ -170,6 +262,7 @@ export const register: Register = (on, options: Options = {}) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const shown = await read($, limits)
     const last = await read($, turn)
+    const times = await read($, multiplier)
     await read($, tick)
     if (e.props.hasSurvey || (shown.length === 0 && !last)) return next(e)
     const now = await $.clock.now()
@@ -187,6 +280,7 @@ export const register: Register = (on, options: Options = {}) => {
     const line = shown.map(l => `${labels[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}%` + (l.resetsAt ? ` · ${resetText(l, now)}` : '')).join('   ')
       + (context ? `   ctx ${context.percent}% · ${tokensText(last!.tokens)}` : '')
       + (cache ? `   cache ${cache.text}` : '')
+      + (times !== null ? `   cost ×${times.toFixed(1)}` : '')
     if (e.surface !== 'desktop' || !('Svg' in ui)) return <Text dimColor>{line}</Text>
     const { Svg } = ui as any
 
@@ -214,6 +308,12 @@ export const register: Register = (on, options: Options = {}) => {
             <Text dimColor>cache</Text>
             <Svg source={meter(cache.share, cache.color, 60, 8)} alt={`cache ${cache.text}`} width={60} height={8} />
             <Text color={cache.color === '#f5f5f7' ? undefined : cache.color}>{cache.text}</Text>
+          </Box>
+        ) : null}
+        {times !== null ? (
+          <Box flexDirection="row" alignItems="center" columnGap={1}>
+            <Text dimColor>cost</Text>
+            <Text>×{times.toFixed(1)}</Text>
           </Box>
         ) : null}
         {buttons.map(b => (
