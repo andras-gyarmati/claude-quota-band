@@ -469,7 +469,8 @@ export const register: Register = (on, options: Options = {}) => {
     const last = await read($, turn)
     const times = await read($, multiplier)
     await read($, tick)
-    if (e.props.hasSurvey || (shown.length === 0 && !last)) return next(e)
+    const below = await next(e)
+    if (e.props.hasSurvey || (shown.length === 0 && !last)) return below
     const now = await $.clock.now()
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
@@ -486,10 +487,11 @@ export const register: Register = (on, options: Options = {}) => {
       + (context ? `   ctx ${context.percent}% · ${tokensText(last!.tokens)}` : '')
       + (cache ? `   cache ${cache.text}` : '')
       + (times ? `   cost ×${times.value.toFixed(1)}${times.measured ? ' measured' : ''}` : '')
-    if (e.surface !== 'desktop' || !('Svg' in ui)) return <Text dimColor>{line}</Text>
+    if (e.surface !== 'desktop' || !('Svg' in ui)) return <Box flexDirection="column"><Text dimColor>{line}</Text>{below}</Box>
     const { Svg } = ui as any
 
     return (
+      <Box flexDirection="column">
       <Box flexDirection="row" alignItems="center" columnGap={2}>
         {shown.map(l => (
           <Box key={l.kind} flexDirection="row" alignItems="center" columnGap={1}>
@@ -525,6 +527,8 @@ export const register: Register = (on, options: Options = {}) => {
         {buttons.map(b => (
           <Button key={b.key} label={b.label} onPress={() => { $.prompt.submit({ text: b.text, asUser: true }) }} />
         ))}
+      </Box>
+      {below}
       </Box>
     )
   })
