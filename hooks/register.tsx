@@ -1,11 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Limit, Turn } from '../types'
+import type { Limit, Multiplier, Turn } from '../types'
 
 const limits = atom({ plugin: 'quota-band', key: 'limits' } as const, [] as Limit[])
 const turn = atom({ plugin: 'quota-band', key: 'turn' } as const, null as Turn | null)
-const multiplier = atom({ plugin: 'quota-band', key: 'multiplier' } as const, null as number | null)
+const multiplier = atom({ plugin: 'quota-band', key: 'multiplier' } as const, null as Multiplier | null)
 const tick = atom({ plugin: 'quota-band', key: 'tick' } as const, 0)
 
 const HOUR = 3600e3
@@ -67,20 +67,28 @@ function writeRate(u: Usage): number {
   return hour + five > 0 ? (hour * WRITE_1H_RATE + five * WRITE_5M_RATE) / (hour + five) : WRITE_5M_RATE
 }
 
-function cost(u: Usage): number {
+/** Quota used per token kind, relative to a cache write: measured by
+ * `fitWeights`; null means the API price ratios. */
+type Weights = { write: number; read: number; output: number }
+
+function cost(u: Usage, w: Weights | null): number {
+  const written = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+  if (w) return written * w.write + (u.cache_read_input_tokens ?? 0) * w.read + (u.output_tokens ?? 0) * w.output
   return (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) * writeRate(u)
     + (u.cache_read_input_tokens ?? 0) * READ_RATE + (u.output_tokens ?? 0) * OUTPUT_RATE
 }
 
 /** What resending `old` tokens of earlier context cost this request: read from
  * the cache first, then written to it, then sent uncached. */
-function carried(u: Usage, old: number): number {
+function carried(u: Usage, old: number, w: Weights | null): number {
   const read = Math.min(old, u.cache_read_input_tokens ?? 0)
   const written = Math.min(old - read, u.cache_creation_input_tokens ?? 0)
-  return read * READ_RATE + written * writeRate(u) + (old - read - written)
+  return read * (w?.read ?? READ_RATE) + written * (w?.write ?? writeRate(u)) + (old - read - written) * (w?.write ?? 1)
 }
 
-type Entry = { type?: string; isMeta?: boolean; isSidechain?: boolean; message?: { id?: string; content?: unknown; usage?: Usage } }
+type Entry = { type?: string; timestamp?: string; isMeta?: boolean; isSidechain?: boolean; message?: { id?: string; content?: unknown; usage?: Usage } }
+
+type Request = { at: number; usage: Usage }
 
 const parse = (line: string): Entry | null => { try { return JSON.parse(line) } catch { return null } }
 
@@ -98,11 +106,11 @@ function baselineTokens(head: string[]): number | null {
   return null
 }
 
-/** The last turn's cost over what the same turn costs on a fresh thread: every
- * request in it resends the context the turn started with beyond `baseline`. */
-function turnMultiplier(tail: string[], baseline: number): number | null {
+/** The last turn's requests, newest first. A response spans several transcript
+ * lines that repeat its usage, so each message id counts once. */
+function lastTurn(tail: string[]): Request[] {
   const seen = new Set<string>()
-  const usages: Usage[] = []
+  const requests: Request[] = []
   for (let i = tail.length - 1; i >= 0; i--) {
     const e = parse(tail[i])
     if (!e || e.isSidechain) continue
@@ -110,13 +118,140 @@ function turnMultiplier(tail: string[], baseline: number): number | null {
     const id = e.message?.id
     if (e.type !== 'assistant' || !e.message?.usage || !id || seen.has(id)) continue
     seen.add(id)
-    usages.push(e.message.usage)
+    requests.push({ at: Date.parse(e.timestamp ?? '') || 0, usage: e.message.usage })
   }
-  if (usages.length === 0) return null
-  const old = Math.max(0, sentTokens(usages[usages.length - 1]) - baseline)
-  const actual = usages.reduce((sum, u) => sum + cost(u), 0)
-  const fresh = usages.reduce((sum, u) => sum + cost(u) - carried(u, old), 0)
+  return requests
+}
+
+/** The turn's cost over what the same turn costs on a fresh thread: every
+ * request in it resends the context the turn started with beyond `baseline`. */
+function turnMultiplier(turn: Request[], baseline: number, w: Weights | null): number | null {
+  if (turn.length === 0) return null
+  const old = Math.max(0, sentTokens(turn[turn.length - 1].usage) - baseline)
+  const actual = turn.reduce((sum, r) => sum + cost(r.usage, w), 0)
+  const fresh = turn.reduce((sum, r) => sum + cost(r.usage, w) - carried(r.usage, old, w), 0)
   return fresh > 0 ? actual / fresh : null
+}
+
+/** One session's calibration record in `$.store`: requests as [unix s, tokens
+ * written or sent uncached, cache read, output], quota readings as [unix s,
+ * 5h %, 7d %]. */
+type Log = { updated: number; requests: number[][]; readings: (number | null)[][] }
+
+const LOG_PREFIX = 'calibration/'
+const KEEP_MS = 8 * 86400e3
+const READING_EVERY_S = 300
+const REFIT_MS = 10 * 60e3
+/** Guesses: a quota step large enough that the one-decimal reading and request
+ * timing are noise, a gap after which usage elsewhere (claude.ai, another
+ * machine) is likely, and enough intervals to fit two weights. */
+const MIN_STEP = 1
+const MAX_GAP_S = 30 * 60
+const MIN_INTERVALS = 20
+
+const requestRow = (r: Request): number[] => [
+  Math.round(r.at / 1e3),
+  (r.usage.input_tokens ?? 0) + (r.usage.cache_creation_input_tokens ?? 0),
+  r.usage.cache_read_input_tokens ?? 0,
+  r.usage.output_tokens ?? 0,
+]
+
+/** Output per cache-write token at API prices with hour-long writes. Output is
+ * about a tenth of a turn's quota use, below what the readings can resolve, so
+ * it stays at this ratio and only writes and reads are measured. */
+const OUTPUT_PER_WRITE = OUTPUT_RATE / WRITE_1H_RATE
+/** Guesses: an interval using this much more than the fit predicts had usage
+ * this log cannot see; the read weight is trusted once its resampled 10th to
+ * 90th percentile range stays within this share of it. */
+const OUTLIER = 1.3
+const MAX_SPREAD = 0.25
+const RESAMPLES = 100
+
+type Fit = { kind: string; intervals: number; dropped: number; writePerPoint: number | null; weights: Weights | null; readRange: [number, number] | null }
+
+const usable = (fit: Fit | null): fit is Fit & { weights: Weights; readRange: [number, number] } =>
+  !!fit?.weights && !!fit.readRange && fit.intervals >= MIN_INTERVALS
+  && fit.readRange[1] - fit.readRange[0] <= 2 * MAX_SPREAD * fit.weights.read
+
+/** Intervals in which a window rose at least `MIN_STEP`, as rows of [written +
+ * weighted output, cache read] in millions of tokens and the points used. */
+function quotaIntervals(logs: Log[], column: 1 | 2): { rows: number[][]; ys: number[] } {
+  const readings = logs.flatMap(l => l.readings)
+    .filter(r => typeof r[column] === 'number')
+    .map(r => [r[0] as number, r[column] as number])
+    .sort((a, b) => a[0] - b[0])
+  const requests = logs.flatMap(l => l.requests)
+  const rows: number[][] = []
+  const ys: number[] = []
+  let start = readings[0]
+  for (let i = 1; i < readings.length; i++) {
+    const [t, p] = readings[i]
+    const [prevT, prevP] = readings[i - 1]
+    if (p < prevP || t - prevT > MAX_GAP_S) { start = readings[i]; continue }
+    if (p - start[1] < MIN_STEP) continue
+    const row = [0, 0]
+    for (const q of requests) {
+      if (q[0] <= start[0] || q[0] > t) continue
+      row[0] += (q[1] + q[3] * OUTPUT_PER_WRITE) / 1e6
+      row[1] += q[2] / 1e6
+    }
+    rows.push(row)
+    ys.push(p - start[1])
+    start = readings[i]
+  }
+  return { rows, ys }
+}
+
+/** Least squares for points = rows·[W, R] with W > 0 and R ≥ 0. */
+function leastSquares(rows: number[][], ys: number[]): [number, number] | null {
+  let aa = 0, ab = 0, bb = 0, ay = 0, by = 0
+  rows.forEach(([a, b], i) => { aa += a * a; ab += a * b; bb += b * b; ay += a * ys[i]; by += b * ys[i] })
+  const det = aa * bb - ab * ab
+  if (det > 1e-12) {
+    const w = (ay * bb - by * ab) / det
+    const r = (by * aa - ay * ab) / det
+    if (w > 0 && r >= 0) return [w, r]
+  }
+  return aa > 0 && ay > 0 ? [ay / aa, 0] : null
+}
+
+/** Fits the points each interval used, drops intervals well above the fit as
+ * usage elsewhere (claude.ai, another machine) and fits again; the read weight's
+ * range comes from refitting resampled intervals. */
+function fitWeights(logs: Log[], column: 1 | 2, kind: string): Fit {
+  const { rows, ys } = quotaIntervals(logs, column)
+  const none: Fit = { kind, intervals: rows.length, dropped: 0, writePerPoint: null, weights: null, readRange: null }
+  const first = leastSquares(rows, ys)
+  if (!first) return none
+  const kept = rows.map((r, i) => i).filter(i => ys[i] <= OUTLIER * (rows[i][0] * first[0] + rows[i][1] * first[1]))
+  const keptRows = kept.map(i => rows[i])
+  const keptYs = kept.map(i => ys[i])
+  const fit = leastSquares(keptRows, keptYs)
+  if (!fit) return none
+  let seed = 1
+  const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648
+  const reads: number[] = []
+  for (let n = 0; n < RESAMPLES; n++) {
+    const pick = keptRows.map(() => Math.floor(random() * keptRows.length))
+    const again = leastSquares(pick.map(i => keptRows[i]), pick.map(i => keptYs[i]))
+    if (again) reads.push(again[1] / again[0])
+  }
+  reads.sort((a, b) => a - b)
+  return {
+    kind,
+    intervals: kept.length,
+    dropped: rows.length - kept.length,
+    writePerPoint: 1e6 / fit[0],
+    weights: { write: 1, read: fit[1] / fit[0], output: OUTPUT_PER_WRITE },
+    readRange: reads.length >= RESAMPLES / 2 ? [reads[Math.floor(reads.length * 0.1)], reads[Math.floor(reads.length * 0.9)]] : null,
+  }
+}
+
+function fitText(fit: Fit): string {
+  const head = `${fit.kind}: ${fit.intervals} intervals` + (fit.dropped ? `, ${fit.dropped} dropped as usage elsewhere` : '')
+  if (!fit.weights) return `${head}, no fit yet`
+  const range = fit.readRange ? ` (${fit.readRange[0].toFixed(3)} to ${fit.readRange[1].toFixed(3)})` : ''
+  return `${head}; 1% = ${tokensText(fit.writePerPoint)} cache-write tokens; cache read = ${fit.weights.read.toFixed(3)}${range} of a cache write, API 0.05 to 0.08`
 }
 
 function tokensText(tokens: number | null): string {
@@ -205,13 +340,66 @@ function meter(share: number, color: string, width: number, height: number): str
     + `<rect width="${fill}" height="${height}" rx="2" fill="${color}"/></svg>`
 }
 
+type Calibration = { own: { key: string; log: Log } | null; fits: Fit[]; fittedAt: number }
+
+async function ownLog($: any, c: Calibration): Promise<{ key: string; log: Log }> {
+  const key = LOG_PREFIX + await $.session.id()
+  if (c.own?.key !== key) c.own = { key, log: ((await $.store.get(key)) as Log | undefined) ?? { updated: 0, requests: [], readings: [] } }
+  return c.own
+}
+
+/** Expired session logs are dropped; when the store refuses a write as
+ * over its 4 MiB, the oldest other log goes and the write is tried again. */
+async function calibrationLogs($: any): Promise<{ key: string; log: Log }[]> {
+  const now = await $.clock.now()
+  const found: { key: string; log: Log }[] = []
+  for (const key of (await $.store.keys()) as string[]) {
+    if (!key.startsWith(LOG_PREFIX)) continue
+    const log = (await $.store.get(key)) as Log | undefined
+    if (!log || now - log.updated > KEEP_MS) await $.store.delete(key)
+    else found.push({ key, log })
+  }
+  return found.sort((a, b) => a.log.updated - b.log.updated)
+}
+
+async function saveLog($: any, mine: { key: string; log: Log }) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await $.store.set(mine.key, mine.log)
+      return
+    } catch {
+      const oldest = (await calibrationLogs($)).find(l => l.key !== mine.key)
+      if (!oldest) break
+      await $.store.delete(oldest.key)
+    }
+  }
+  $.ui.toast('quota-band: calibration log not saved')
+}
+
+async function refit($: any, c: Calibration) {
+  const all = (await calibrationLogs($)).map(l => (l.key === c.own?.key ? c.own.log : l.log))
+  if (c.own && !all.includes(c.own.log)) all.push(c.own.log)
+  c.fits = [fitWeights(all, 1, '5h'), fitWeights(all, 2, '7d')]
+  c.fittedAt = await $.clock.now()
+}
+
 export const register: Register = (on, options: Options = {}) => {
   let warned = 0
   let observedTtl: number | null = null
   let baseline: { path: string; tokens: number } | null = null
+  const calibration: Calibration = { own: null, fits: [], fittedAt: 0 }
+
+  on('command.run', { command: 'quota-weights' }, async $ => {
+    await refit($, calibration)
+    const used = usable(calibration.fits[0]) ? 'measured 5h weights' : `API price ratios until 5h has ${MIN_INTERVALS} intervals and a cache read range within ±${MAX_SPREAD * 100}%`
+    return { text: [...calibration.fits.map(fitText), `output stays at ${OUTPUT_PER_WRITE} cache writes per token`, `cost × uses ${used}`].join('\n') }
+  })
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
+    await $.command.register({ name: 'quota-weights', description: 'How much of the 5h and 7d quota cache reads and output use, measured against cache writes' })
+    await ownLog($, calibration)
+    await refit($, calibration)
     const usage = await $.session.usage()
     if (usage.rateLimits.length > 0) await update($, limits, () => usage.rateLimits)
     $.clock.every(60e3, () => {
@@ -233,6 +421,14 @@ export const register: Register = (on, options: Options = {}) => {
     const ttlMs = observedTtl ?? await cacheTtl($, e.rateLimits.length > 0)
     const at = await $.clock.now()
     await update($, turn, () => ({ at, tokens: e.context.tokens ?? null, window: e.context.window ?? null, ttlMs }))
+    const five = e.rateLimits.find(l => l.kind === 'five_hour')?.percentUsed ?? null
+    const seven = e.rateLimits.find(l => l.kind === 'seven_day')?.percentUsed ?? null
+    if (five !== null || seven !== null) {
+      const { log } = await ownLog($, calibration)
+      const last = log.readings[log.readings.length - 1]
+      const t = Math.round(at / 1e3)
+      if (!last || last[1] !== five || last[2] !== seven || t - (last[0] as number) >= READING_EVERY_S) log.readings.push([t, five, seven])
+    }
     return next(e)
   })
 
@@ -252,9 +448,18 @@ export const register: Register = (on, options: Options = {}) => {
       const tokens = head ? baselineTokens(head) : null
       baseline = tokens === null ? null : { path, tokens }
     }
+    const requests = lastTurn(tail)
+    const mine = await ownLog($, calibration)
+    const loggedUntil = mine.log.requests[mine.log.requests.length - 1]?.[0] ?? 0
+    mine.log.requests.push(...requests.map(requestRow).filter(r => r[0] > loggedUntil).reverse())
+    mine.log.updated = await $.clock.now()
+    await saveLog($, mine)
+    if (mine.log.updated - calibration.fittedAt >= REFIT_MS) await refit($, calibration)
     if (baseline) {
-      const value = turnMultiplier(tail, baseline.tokens)
-      await update($, multiplier, () => value)
+      const fit = calibration.fits[0] ?? null
+      const weights = usable(fit) ? fit.weights : null
+      const value = turnMultiplier(requests, baseline.tokens, weights)
+      await update($, multiplier, () => (value === null ? null : { value, measured: weights !== null }))
     }
     return result
   })
@@ -280,7 +485,7 @@ export const register: Register = (on, options: Options = {}) => {
     const line = shown.map(l => `${labels[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}%` + (l.resetsAt ? ` · ${resetText(l, now)}` : '')).join('   ')
       + (context ? `   ctx ${context.percent}% · ${tokensText(last!.tokens)}` : '')
       + (cache ? `   cache ${cache.text}` : '')
-      + (times !== null ? `   cost ×${times.toFixed(1)}` : '')
+      + (times ? `   cost ×${times.value.toFixed(1)}${times.measured ? ' measured' : ''}` : '')
     if (e.surface !== 'desktop' || !('Svg' in ui)) return <Text dimColor>{line}</Text>
     const { Svg } = ui as any
 
@@ -310,10 +515,11 @@ export const register: Register = (on, options: Options = {}) => {
             <Text color={cache.color === '#f5f5f7' ? undefined : cache.color}>{cache.text}</Text>
           </Box>
         ) : null}
-        {times !== null ? (
+        {times ? (
           <Box flexDirection="row" alignItems="center" columnGap={1}>
             <Text dimColor>cost</Text>
-            <Text>×{times.toFixed(1)}</Text>
+            <Text>×{times.value.toFixed(1)}</Text>
+            {times.measured ? <Text dimColor>measured</Text> : null}
           </Box>
         ) : null}
         {buttons.map(b => (

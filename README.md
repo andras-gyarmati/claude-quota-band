@@ -13,6 +13,20 @@ A Claude Code mod that keeps your plan's usage in view: one line above the promp
 - `ctx` is how full the context window is; `370k` is what the next request re-sends, which a cold cache has to write again.
 - `cache` drains over the time the prompt cache stays warm after the last response: the length the last response actually wrote, read from the transcript at the end of each turn, so it drops to five minutes in overage. Until the first turn ends (and on Windows, which has no `tail`) it assumes an hour on a subscription's main thread, five minutes otherwise, or what `promptCacheTtl` sets. It turns orange in the last five minutes, with a toast, and red once cold.
 - `cost ×4.5` is what the last turn cost over the same turn in a fresh thread. Every request in a turn (one per tool call) resends the context, so a long thread costs more per message even with a warm cache. The fresh thread starts from what the session's first request sent (system prompt, tools, rules). Token kinds are weighed at API price ratios: cache read 0.1, cache write 1.25 (5 minutes) or 2 (1 hour), output 5, against uncached input 1. How the plan's quotas weigh them is not published, so treat it as an estimate.
+- Once the plan's own readings have measured the weights (below), `cost` uses those and says `measured`.
+
+## Measured quota weights
+
+Each session logs its requests' token counts and the 5h and 7d readings to the plugin's store, kept for eight days. Readings from all sessions are cut into intervals in which a window rose at least one point, and a least-squares fit gives how many cache-write tokens make 1% and what a cache read weighs against a cache write. Output stays at the API ratio of 2.5 cache writes per token: it is about a tenth of the quota use, too little to separate from the noise. `/quota-weights` prints the fit:
+
+```
+5h: 52 intervals, 3 dropped as usage elsewhere; 1% = 2.0M cache-write tokens; cache read = 0.052 (0.048 to 0.058) of a cache write, API 0.05 to 0.08
+7d: 6 intervals; 1% = 14.1M cache-write tokens; cache read = 0.061 (0.030 to 0.090) of a cache write, API 0.05 to 0.08
+output stays at 2.5 cache writes per token
+cost × uses measured 5h weights
+```
+
+The readings cover the whole account, so usage the log cannot see (claude.ai, another machine, subagents) lands in them too. Intervals that used 30% more than the fit predicts are dropped as such, intervals across a 30-minute silence are skipped, and `cost` switches to measured weights only after 20 intervals with the cache read's 10th to 90th percentile range within ±25%.
 
 ## Buttons
 
@@ -28,7 +42,7 @@ Two optional buttons send a prompt of your choice, for example a wrap-up skill. 
 
 Empty hides a button. A press during a turn waits until the turn ends.
 
-It reads the figures Claude Code already receives with each response (`session.measure`), and the ends of the session's transcript at the end of each turn, so it sends no requests of its own and writes no files. The figures appear after the first response of a session, on Pro, Max and Team plans.
+It reads the figures Claude Code already receives with each response (`session.measure`), and the ends of the session's transcript at the end of each turn, so it sends no requests of its own and writes only to its own plugin store. The figures appear after the first response of a session, on Pro, Max and Team plans.
 
 ## Install
 
