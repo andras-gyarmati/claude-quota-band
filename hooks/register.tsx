@@ -340,6 +340,21 @@ function meter(share: number, color: string, width: number, height: number): str
     + `<rect width="${fill}" height="${height}" rx="2" fill="${color}"/></svg>`
 }
 
+/** The Claude Profiles Mac app shows each account's quota; the figures every response carries
+ * spare it a request to Anthropic's rate-limited usage endpoint. Written only where that app is
+ * installed, one file per account (Desktop sessions name it) or per CLI config folder. */
+async function handOff($: any, rateLimits: unknown[]): Promise<void> {
+  const home = await $.env.get('HOME')
+  if (!home) return
+  const root = home + '/Library/Application Support/Claude Profiles'
+  if (!(await $.fs.exists(root))) return
+  const account = await $.env.get('CLAUDE_CODE_ACCOUNT_UUID')
+  const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
+  const name = account ? 'account-' + account : 'config-' + (configDir ?? 'default').replace(/[^A-Za-z0-9]+/g, '-')
+  const email = await $.env.get('CLAUDE_CODE_USER_EMAIL')
+  await $.fs.write(`${root}/mod-readings/${name}.json`, JSON.stringify({ at: new Date().toISOString(), account, email, configDir, rateLimits }))
+}
+
 type Calibration = { own: { key: string; log: Log } | null; fits: Fit[]; fittedAt: number }
 
 async function ownLog($: any, c: Calibration): Promise<{ key: string; log: Log }> {
@@ -417,7 +432,10 @@ export const register: Register = (on, options: Options = {}) => {
   })
 
   on('session.measure', async ($, e, next) => {
-    if (e.rateLimits.length > 0) await update($, limits, () => e.rateLimits)
+    if (e.rateLimits.length > 0) {
+      await update($, limits, () => e.rateLimits)
+      handOff($, e.rateLimits).catch(() => {})
+    }
     const ttlMs = observedTtl ?? await cacheTtl($, e.rateLimits.length > 0)
     const at = await $.clock.now()
     await update($, turn, () => ({ at, tokens: e.context.tokens ?? null, window: e.context.window ?? null, ttlMs }))

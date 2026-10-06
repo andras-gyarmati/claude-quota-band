@@ -1,6 +1,6 @@
 {
   "name": "quota-band",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Your Claude plan's 5h and weekly usage, the context window and the prompt cache's time left, as one line of bars above the prompt",
   "author": {
     "name": "Andras Gyarmati",

@@ -42,7 +42,7 @@ Two optional buttons send a prompt of your choice, for example a wrap-up skill. 
 
 Empty hides a button. A press during a turn waits until the turn ends.
 
-It reads the figures Claude Code already receives with each response (`session.measure`), and the ends of the session's transcript at the end of each turn, so it sends no requests of its own and writes only to its own plugin store. The figures appear after the first response of a session, on Pro, Max and Team plans.
+It reads the figures Claude Code already receives with each response (`session.measure`), and the ends of the session's transcript at the end of each turn, so it sends no requests of its own. It writes to its own plugin store and, where the Claude Profiles Mac app is installed, the latest figures per account to `~/Library/Application Support/Claude Profiles/mod-readings/`, which that app shows instead of asking Anthropic. The figures appear after the first response of a session, on Pro, Max and Team plans.
 
 ## Install
 
