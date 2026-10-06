@@ -487,7 +487,9 @@ export const register: Register = (on, options: Options = {}) => {
       + (context ? `   ctx ${context.percent}% · ${tokensText(last!.tokens)}` : '')
       + (cache ? `   cache ${cache.text}` : '')
       + (times ? `   cost ×${times.value.toFixed(1)}${times.measured ? ' measured' : ''}` : '')
-    if (e.surface !== 'desktop' || !('Svg' in ui)) return <Box flexDirection="column"><Text dimColor>{line}</Text>{below}</Box>
+    // Wider than any terminal; the divider row clips it to the band's width.
+    const divider = below ? <Box height={1} overflow="hidden"><Text dimColor>{'─'.repeat(400)}</Text></Box> : null
+    if (e.surface !== 'desktop' || !('Svg' in ui)) return <Box flexDirection="column"><Text dimColor>{line}</Text>{divider}{below}</Box>
     const { Svg } = ui as any
 
     return (
@@ -528,6 +530,7 @@ export const register: Register = (on, options: Options = {}) => {
           <Button key={b.key} label={b.label} onPress={() => { $.prompt.submit({ text: b.text, asUser: true }) }} />
         ))}
       </Box>
+      {divider}
       {below}
       </Box>
     )
