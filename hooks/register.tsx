@@ -11,6 +11,9 @@ const tick = atom({ plugin: 'quota-band', key: 'tick' } as const, 0)
 const HOUR = 3600e3
 const FIVE_MINUTES = 5 * 60e3
 const COLD_SOON = FIVE_MINUTES
+/** Shares of the cache lifetime left at which a thread pings, warmest first. */
+export const COLD_STEPS = [0.5, 0.25, 0.1, 0.05]
+const COLD_CHECK_MS = 10e3
 const TRANSCRIPT_TAIL_BYTES = '524288'
 
 /** The fallback before a transcript has been read: subscribers' main thread
@@ -42,6 +45,35 @@ function writtenTtl(lines: string[]): number | null {
     } catch {}
   }
   return null
+}
+
+/** The thread's title as the app last set it, from a transcript's end. */
+function threadTitle(lines: string[]): string | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"custom-title"')) continue
+    try {
+      const title = JSON.parse(lines[i])?.customTitle
+      if (typeof title === 'string' && title) return title
+    } catch {}
+  }
+  return null
+}
+
+/** The coldest step `left` of `ttlMs` has passed, as an index into
+ * `COLD_STEPS`; -1 above the first, null once cold. */
+export function coldStep(left: number, ttlMs: number): number | null {
+  if (left <= 0) return null
+  let step = -1
+  COLD_STEPS.forEach((share, i) => { if (left <= share * ttlMs) step = i })
+  return step
+}
+
+/** A Notification Centre banner, so a ping reaches him outside the thread. The
+ * text goes in as arguments, never into the script. macOS only. */
+async function notify($: any, title: string, text: string) {
+  await $.process.run(['/usr/bin/osascript',
+    '-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)', '-e', 'end run',
+    title, text]).catch(() => null)
 }
 
 type Usage = {
@@ -399,7 +431,8 @@ async function refit($: any, c: Calibration) {
 }
 
 export const register: Register = (on, options: Options = {}) => {
-  let warned = 0
+  let pinged = { at: 0, step: -1 }
+  let title: string | null = null
   let observedTtl: number | null = null
   let baseline: { path: string; tokens: number } | null = null
   const calibration: Calibration = { own: null, fits: [], fittedAt: 0 }
@@ -417,15 +450,20 @@ export const register: Register = (on, options: Options = {}) => {
     await refit($, calibration)
     const usage = await $.session.usage()
     if (usage.rateLimits.length > 0) await update($, limits, () => usage.rateLimits)
-    $.clock.every(60e3, () => {
-      update($, tick, n => n + 1)
-      read($, turn).then(last => {
+    $.clock.every(60e3, () => { update($, tick, n => n + 1) })
+    $.clock.every(COLD_CHECK_MS, () => {
+      read($, turn).then(async last => {
         if (!last) return
         const left = last.at + last.ttlMs - Date.now()
-        if (left > 0 && left <= COLD_SOON && warned !== last.at) {
-          warned = last.at
-          $.ui.toast(`Prompt cache goes cold in ${Math.ceil(left / 60e3)} min · ${tokensText(last.tokens)} to rebuild`)
-        }
+        const step = coldStep(left, last.ttlMs)
+        if (step === null || step < 0) return
+        if (pinged.at === last.at && pinged.step >= step) return
+        pinged = { at: last.at, step }
+        const minutes = left >= 60e3 ? `${Math.round(left / 60e3)} min` : `${Math.round(left / 1e3)} s`
+        const text = `Prompt cache ${COLD_STEPS[step] * 100}% warm · cold in ${minutes} · ${tokensText(last.tokens)} to rebuild`
+        $.ui.toast(text, { timeoutMs: 10e3 })
+        const folder = (await $.session.cwd().catch(() => '')).split('/').pop()
+        await notify($, title ?? folder ?? 'Claude', text)
       })
     })
     return result
@@ -456,6 +494,7 @@ export const register: Register = (on, options: Options = {}) => {
     if (!path) return result
     const tail = await transcriptEnd($, 'tail', path)
     if (!tail) return result
+    title = threadTitle(tail) ?? title
     const ttlMs = writtenTtl(tail)
     if (ttlMs !== null) {
       observedTtl = ttlMs
