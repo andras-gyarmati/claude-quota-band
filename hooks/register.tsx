@@ -76,6 +76,13 @@ async function notify($: any, title: string, text: string) {
     title, text]).catch(() => null)
 }
 
+/** An iMessage from this Mac's Messages account, which reaches the phone. */
+async function sendIMessage($: any, to: string, text: string) {
+  await $.process.run(['/usr/bin/osascript',
+    '-e', 'on run argv', '-e', 'tell application "Messages" to send (item 2 of argv) to participant (item 1 of argv) of (1st account whose service type = iMessage)', '-e', 'end run',
+    to, text]).catch(() => null)
+}
+
 type Usage = {
   input_tokens?: number
   cache_creation_input_tokens?: number
@@ -362,7 +369,7 @@ function bar(limit: Limit, now: number, width: number, height: number): string {
   return svg + `</svg>`
 }
 
-type Options = { closeCommand?: string; renamePrompt?: string }
+type Options = { closeCommand?: string; renamePrompt?: string; iMessageTo?: string }
 
 /** A plain filled bar for a share of 0 to 1. */
 function meter(share: number, color: string, width: number, height: number): string {
@@ -464,6 +471,7 @@ export const register: Register = (on, options: Options = {}) => {
         $.ui.toast(text, { timeoutMs: 10e3 })
         const folder = (await $.session.cwd().catch(() => '')).split('/').pop()
         await notify($, title ?? folder ?? 'Claude', text)
+        if (options.iMessageTo) await sendIMessage($, String(options.iMessageTo), `${title ?? folder ?? 'Claude'}: ${text}`)
       })
     })
     return result

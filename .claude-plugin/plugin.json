@@ -1,6 +1,6 @@
 {
   "name": "quota-band",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Your Claude plan's 5h and weekly usage, the context window and the prompt cache's time left, as one line of bars above the prompt",
   "author": {
     "name": "Andras Gyarmati",
@@ -19,6 +19,12 @@
       "type": "string",
       "title": "Rename button",
       "description": "Prompt sent by a 'rename' button; empty hides the button",
+      "default": ""
+    },
+    "iMessageTo": {
+      "type": "string",
+      "title": "iMessage pings to",
+      "description": "Phone number or Apple ID that gets each cache ping as an iMessage from this Mac; empty sends none",
       "default": ""
     }
   }

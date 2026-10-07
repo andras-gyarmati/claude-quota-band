@@ -11,7 +11,7 @@ A Claude Code mod that keeps your plan's usage in view: one line above the promp
 - `→ N%` is where the current pace lands by the reset, with a dashed outline on the bar.
 - The time is when the window resets.
 - `ctx` is how full the context window is; `370k` is what the next request re-sends, which a cold cache has to write again.
-- `cache` drains over the time the prompt cache stays warm after the last response: the length the last response actually wrote, read from the transcript at the end of each turn, so it drops to five minutes in overage. Until the first turn ends (and on Windows, which has no `tail`) it assumes an hour on a subscription's main thread, five minutes otherwise, or what `promptCacheTtl` sets. It turns orange in the last five minutes and red once cold. When 50%, 25%, 10% and 5% of the lifetime is left, every thread pings with a toast and, on macOS, a Notification Centre banner titled with the thread's name (`osascript`, so the banner comes from Script Editor, which macOS may ask to allow once).
+- `cache` drains over the time the prompt cache stays warm after the last response: the length the last response actually wrote, read from the transcript at the end of each turn, so it drops to five minutes in overage. Until the first turn ends (and on Windows, which has no `tail`) it assumes an hour on a subscription's main thread, five minutes otherwise, or what `promptCacheTtl` sets. It turns orange in the last five minutes and red once cold. When 50%, 25%, 10% and 5% of the lifetime is left, every thread pings with a toast and, on macOS, a Notification Centre banner titled with the thread's name (`osascript`, so the banner comes from Script Editor, which macOS may ask to allow once). Set `iMessageTo` (below) to a phone number or Apple ID to get the same pings on the phone, sent through this Mac's Messages app; macOS asks once to let Claude control Messages.
 - `cost ×4.5` is what the last turn cost over the same turn in a fresh thread. Every request in a turn (one per tool call) resends the context, so a long thread costs more per message even with a warm cache. The fresh thread starts from what the session's first request sent (system prompt, tools, rules). Token kinds are weighed at API price ratios: cache read 0.1, cache write 1.25 (5 minutes) or 2 (1 hour), output 5, against uncached input 1. How the plan's quotas weigh them is not published, so treat it as an estimate.
 - Once the plan's own readings have measured the weights (below), `cost` uses those and says `measured`.
 
@@ -35,7 +35,7 @@ Two optional buttons send a prompt of your choice, for example a wrap-up skill. 
 ```json
 "pluginConfigs": {
   "quota-band@claude-quota-band": {
-    "options": { "closeCommand": "/close-thread", "renamePrompt": "Rename this thread to cover every topic in it" }
+    "options": { "closeCommand": "/close-thread", "renamePrompt": "Rename this thread to cover every topic in it", "iMessageTo": "" }
   }
 }
 ```
