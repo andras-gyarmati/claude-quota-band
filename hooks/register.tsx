@@ -379,13 +379,13 @@ function meter(share: number, color: string, width: number, height: number): str
     + `<rect width="${fill}" height="${height}" rx="2" fill="${color}"/></svg>`
 }
 
-/** The Claude Profiles Mac app shows each account's quota; the figures every response carries
+/** The Agent Profiles Mac app shows each account's quota; the figures every response carries
  * spare it a request to Anthropic's rate-limited usage endpoint. Written only where that app is
  * installed, one file per account (Desktop sessions name it) or per CLI config folder. */
 async function handOff($: any, rateLimits: unknown[]): Promise<void> {
   const home = await $.env.get('HOME')
   if (!home) return
-  const root = home + '/Library/Application Support/Claude Profiles'
+  const root = home + '/Library/Application Support/Agent Profiles'
   if (!(await $.fs.exists(root))) return
   const account = await $.env.get('CLAUDE_CODE_ACCOUNT_UUID')
   const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
