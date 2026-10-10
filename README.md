@@ -28,19 +28,17 @@ cost × uses measured 5h weights
 
 The readings cover the whole account, so usage the log cannot see (claude.ai, another machine, subagents) lands in them too. Intervals that used 30% more than the fit predicts are dropped as such, intervals across a 30-minute silence are skipped, and `cost` switches to measured weights only after 20 intervals with the cache read's 10th to 90th percentile range within ±25%.
 
-## Buttons
+## Phone pings
 
-Two optional buttons send a prompt of your choice, for example a wrap-up skill. Set them in `/config` under the plugin's options, or in `settings.json`:
+The cache pings can also go to your phone as an iMessage from this Mac. Set `iMessageTo` in `/config` under the plugin's options, or in `settings.json`:
 
 ```json
 "pluginConfigs": {
-  "quota-band@claude-quota-band": {
-    "options": { "closeCommand": "/close-thread", "renamePrompt": "Rename this thread to cover every topic in it", "iMessageTo": "" }
-  }
+  "quota-band@claude-quota-band": { "options": { "iMessageTo": "" } }
 }
 ```
 
-Empty hides a button. A press during a turn waits until the turn ends.
+The close and rename buttons moved to [prompt-buttons](https://github.com/andras-gyarmati/claude-prompt-buttons).
 
 It reads the figures Claude Code already receives with each response (`session.measure`), and the ends of the session's transcript at the end of each turn, so it sends no requests of its own. It writes to its own plugin store and, where the Agent Profiles Mac app is installed, the latest figures per account to `~/Library/Application Support/Agent Profiles/mod-readings/`, which that app shows instead of asking Anthropic. The figures appear after the first response of a session, on Pro, Max and Team plans.
 

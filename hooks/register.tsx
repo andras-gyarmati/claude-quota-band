@@ -369,7 +369,7 @@ function bar(limit: Limit, now: number, width: number, height: number): string {
   return svg + `</svg>`
 }
 
-type Options = { closeCommand?: string; renamePrompt?: string; iMessageTo?: string }
+type Options = { iMessageTo?: string }
 
 /** A plain filled bar for a share of 0 to 1. */
 function meter(share: number, color: string, width: number, height: number): string {
@@ -538,16 +538,12 @@ export const register: Register = (on, options: Options = {}) => {
     if (e.props.hasSurvey || (shown.length === 0 && !last)) return below
     const now = await $.clock.now()
     const ui = $.ui.resolve(e)
-    const { Box, Text, Button } = ui
+    const { Box, Text } = ui
     const left = last ? last.at + last.ttlMs - now : null
     const cache = left === null || !last ? null
       : left > 0 ? { text: `${Math.ceil(left / 60e3)}m`, share: left / last.ttlMs, color: left <= COLD_SOON ? '#ff8c00' : '#f5f5f7' }
       : { text: 'cold', share: 0, color: '#ff453a' }
     const context = last?.tokens && last.window ? { share: last.tokens / last.window, percent: Math.round((last.tokens / last.window) * 100) } : null
-    const buttons = [
-      options.closeCommand ? { key: 'close', label: 'close', text: String(options.closeCommand) } : null,
-      options.renamePrompt ? { key: 'rename', label: 'rename', text: String(options.renamePrompt) } : null,
-    ].filter(Boolean) as { key: string; label: string; text: string }[]
     const line = shown.map(l => `${labels[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}%` + (l.resetsAt ? ` · ${resetText(l, now)}` : '')).join('   ')
       + (context ? `   ctx ${context.percent}% · ${tokensText(last!.tokens)}` : '')
       + (cache ? `   cache ${cache.text}` : '')
@@ -591,9 +587,6 @@ export const register: Register = (on, options: Options = {}) => {
             {times.measured ? <Text dimColor>measured</Text> : null}
           </Box>
         ) : null}
-        {buttons.map(b => (
-          <Button key={b.key} label={b.label} onPress={() => { $.prompt.submit({ text: b.text, asUser: true }) }} />
-        ))}
       </Box>
       {divider}
       {below}

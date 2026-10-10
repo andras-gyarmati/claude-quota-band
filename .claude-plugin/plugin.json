@@ -1,6 +1,6 @@
 {
   "name": "quota-band",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Your Claude plan's 5h and weekly usage, the context window and the prompt cache's time left, as one line of bars above the prompt",
   "author": {
     "name": "Andras Gyarmati",
@@ -9,18 +9,6 @@
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
-    "closeCommand": {
-      "type": "string",
-      "title": "Close button",
-      "description": "Prompt sent by a 'close' button, such as a wrap-up skill; empty hides the button",
-      "default": ""
-    },
-    "renamePrompt": {
-      "type": "string",
-      "title": "Rename button",
-      "description": "Prompt sent by a 'rename' button; empty hides the button",
-      "default": ""
-    },
     "iMessageTo": {
       "type": "string",
       "title": "iMessage pings to",
