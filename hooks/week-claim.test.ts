@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { elapsed, nextWeek } from './register'
+import { elapsed, giftText, nextWeek } from './register'
 
 const reset = '2026-10-14T16:00:00Z'
 const at = (iso: string) => new Date(iso).getTime()
@@ -27,4 +27,10 @@ test('the natural weekly reset clears the claim', () => {
 test('the 5h window ignores a week claim', () => {
   const limit = { kind: 'five_hour', percentUsed: 10, resetsAt: '2026-10-11T10:00:00Z' }
   expect(near(elapsed(limit, at('2026-10-11T07:30:00Z'), at('2026-10-11T07:00:00Z')))).toBe(near(0.5))
+})
+
+test('a gift names who spent it and where', () => {
+  const at = new Date(2026, 9, 10, 23, 51).getTime()
+  expect(giftText({ at, by: 'Andras', device: null })).toBe('🎁 Sat 23:51 · Andras · device?')
+  expect(giftText({ at, by: 'x1 runner', device: 'x1' })).toBe('🎁 Sat 23:51 · x1 runner')
 })

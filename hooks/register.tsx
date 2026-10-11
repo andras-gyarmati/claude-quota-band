@@ -8,6 +8,7 @@ const turn = atom({ plugin: 'quota-band', key: 'turn' } as const, null as Turn |
 const multiplier = atom({ plugin: 'quota-band', key: 'multiplier' } as const, null as Multiplier | null)
 const tick = atom({ plugin: 'quota-band', key: 'tick' } as const, 0)
 const weekClaim = atom({ plugin: 'quota-band', key: 'weekClaim' } as const, null as number | null)
+const gift = atom({ plugin: 'quota-band', key: 'gift' } as const, null as Gift | null)
 
 const HOUR = 3600e3
 const FIVE_MINUTES = 5 * 60e3
@@ -312,6 +313,27 @@ function resetText(limit: Limit, now: number): string {
   return at.getTime() - now < 20 * 3600e3 ? time : `${days[at.getDay()]} ${time}`
 }
 
+type Gift = { at: number; by?: string; device?: string | null }
+
+/** `🎁 Sat 23:51 · Andras · Mac`: the week's last gift reset as Agent Profiles writes it per account, where installed. */
+export function giftText(g: Gift): string {
+  const at = new Date(g.at)
+  const who = g.by === 'Andras' ? `${g.by} · ${g.device ?? 'device?'}` : g.by ?? 'gift'
+  return `🎁 ${days[at.getDay()]} ${pad(at.getHours())}:${pad(at.getMinutes())} · ${who}`
+}
+
+async function readGift($: any): Promise<Gift | null> {
+  const home = await $.env.get('HOME')
+  const email = (await $.env.get('CLAUDE_CODE_USER_EMAIL'))?.toLowerCase()
+  if (!home || !email) return null
+  const path = `${home}/Library/Application Support/Agent Profiles/resets/${email}.json`
+  if (!(await $.fs.exists(path))) return null
+  try {
+    const gifts = (JSON.parse(await $.fs.read(path))?.gifts ?? []) as Gift[]
+    return gifts.sort((a, b) => b.at - a.at)[0] ?? null
+  } catch { return null }
+}
+
 /** Weekly use never falls by itself within a week, so a drop this large under the same reset time is a claimed reset. */
 const CLAIM_DROP = 10
 /** The reset time read back moves by a second between reads. */
@@ -532,6 +554,8 @@ export const register: Register = (on, options: Options = {}) => {
     const ttlMs = observedTtl ?? await cacheTtl($, e.rateLimits.length > 0)
     const at = await $.clock.now()
     if (e.rateLimits.length > 0) await trackWeek($, e.rateLimits, at).catch(() => {})
+    const found = await readGift($).catch(() => null)
+    await update($, gift, () => found)
     await update($, turn, () => ({ at, tokens: e.context.tokens ?? null, window: e.context.window ?? null, ttlMs }))
     const five = e.rateLimits.find(l => l.kind === 'five_hour')?.percentUsed ?? null
     const seven = e.rateLimits.find(l => l.kind === 'seven_day')?.percentUsed ?? null
@@ -582,6 +606,7 @@ export const register: Register = (on, options: Options = {}) => {
     const last = await read($, turn)
     const times = await read($, multiplier)
     const claimedAt = await read($, weekClaim)
+    const lastGift = await read($, gift)
     await read($, tick)
     const below = await next(e)
     if (e.props.hasSurvey || (shown.length === 0 && !last)) return below
@@ -593,7 +618,8 @@ export const register: Register = (on, options: Options = {}) => {
       : left > 0 ? { text: `${Math.ceil(left / 60e3)}m`, share: left / last.ttlMs, color: left <= COLD_SOON ? '#ff8c00' : '#f5f5f7' }
       : { text: 'cold', share: 0, color: '#ff453a' }
     const context = last?.tokens && last.window ? { share: last.tokens / last.window, percent: Math.round((last.tokens / last.window) * 100) } : null
-    const line = shown.map(l => `${labels[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}%` + (l.resetsAt ? ` · ${resetText(l, now)}` : '')).join('   ')
+    const line = shown.map(l => `${labels[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}%` + (l.resetsAt ? ` · ${resetText(l, now)}` : '')
+      + (l.kind === 'seven_day' && lastGift ? ` · ${giftText(lastGift)}` : '')).join('   ')
       + (context ? `   ctx ${context.percent}% · ${tokensText(last!.tokens)}` : '')
       + (cache ? `   cache ${cache.text}` : '')
       + (times ? `   cost ×${times.value.toFixed(1)}${times.measured ? ' measured' : ''}` : '')
@@ -612,6 +638,7 @@ export const register: Register = (on, options: Options = {}) => {
             <Text>{Math.round(l.percentUsed)}%</Text>
             {projected(l, now, claimedAt) !== null && projected(l, now, claimedAt)! > Math.round(l.percentUsed) ? <Text dimColor>→ {projected(l, now, claimedAt)}%</Text> : null}
             {l.resetsAt ? <Text dimColor>{resetText(l, now)}</Text> : null}
+            {l.kind === 'seven_day' && lastGift ? <Text dimColor>{giftText(lastGift)}</Text> : null}
           </Box>
         ))}
         {context ? (
