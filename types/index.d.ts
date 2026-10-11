@@ -6,6 +6,6 @@ export type Turn = { at: number; tokens: number | null; window: number | null; t
 
 declare module 'claude-code' {
   interface PluginState {
-    'quota-band': { limits: Limit[]; turn: Turn | null; multiplier: Multiplier | null; tick: number }
+    'quota-band': { limits: Limit[]; turn: Turn | null; multiplier: Multiplier | null; tick: number; weekClaim: number | null }
   }
 }

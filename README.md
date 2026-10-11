@@ -7,6 +7,7 @@ A Claude Code mod that keeps your plan's usage in view: one line above the promp
 ```
 
 - Each bar fills with the percent used. A grey tick marks how much of the window has passed, and the notches are hours (5h) or days (7d).
+- A saved reset claimed in the Claude app zeroes the week but keeps its reset time, so from the first reading after the claim the 7d bar runs from the claim to the reset. A claim made while no session was running shows at the next session's first response.
 - Colours: red from 95%, orange from 80%, yellow while you are ahead of an even pace, white otherwise.
 - `→ N%` is where the current pace lands by the reset, with a dashed outline on the bar.
 - The time is when the window resets.
