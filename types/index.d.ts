@@ -2,10 +2,14 @@ export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
 export type Multiplier = { value: number; measured: boolean }
 
+/** Keep-warm pings since his last prompt, when that prompt came, and the
+ * response (`Turn.at`) the last ping was sent for. */
+export type Warm = { sent: number; idleSince: number; pingedFor: number | null }
+
 export type Turn = { at: number; tokens: number | null; window: number | null; ttlMs: number }
 
 declare module 'claude-code' {
   interface PluginState {
-    'quota-band': { limits: Limit[]; turn: Turn | null; multiplier: Multiplier | null; tick: number; weekClaim: number | null; gift: { at: number; by?: string; device?: string | null } | null }
+    'quota-band': { limits: Limit[]; turn: Turn | null; multiplier: Multiplier | null; tick: number; weekClaim: number | null; gift: { at: number; by?: string; device?: string | null } | null; warm: Warm | null }
   }
 }

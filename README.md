@@ -14,6 +14,7 @@ A Claude Code mod that keeps your plan's usage in view: one line above the promp
 - The time is when the window resets.
 - `ctx` is how full the context window is; `370k` is what the next request re-sends, which a cold cache has to write again.
 - `cache` drains over the time the prompt cache stays warm after the last response: the length the last response actually wrote, read from the transcript at the end of each turn, so it drops to five minutes in overage. Until the first turn ends (and on Windows, which has no `tail`) it assumes an hour on a subscription's main thread, five minutes otherwise, or what `promptCacheTtl` sets. It turns orange in the last five minutes and red once cold. When 50%, 25%, 10% and 5% of the lifetime is left, every thread pings with a toast and, on macOS, a Notification Centre banner titled with the thread's name (`osascript`, so the banner comes from Script Editor, which macOS may ask to allow once). Set `iMessageTo` (below) to a phone number or Apple ID to get the same pings on the phone, sent through this Mac's Messages app; macOS asks once to let Claude control Messages.
+- `♨2` after the cache time: keep-warm is on and has pinged twice (below).
 - `cost ×4.5` is what the last turn cost over the same turn in a fresh thread. Every request in a turn (one per tool call) resends the context, so a long thread costs more per message even with a warm cache. The fresh thread starts from what the session's first request sent (system prompt, tools, rules). Token kinds are weighed at API price ratios: cache read 0.1, cache write 1.25 (5 minutes) or 2 (1 hour), output 5, against uncached input 1. How the plan's quotas weigh them is not published, so treat it as an estimate.
 - Once the plan's own readings have measured the weights (below), `cost` uses those and says `measured`.
 
@@ -29,6 +30,21 @@ cost × uses measured 5h weights
 ```
 
 The readings cover the whole account, so usage the log cannot see (claude.ai, another machine, subagents) lands in them too. Intervals that used 30% more than the fit predicts are dropped as such, intervals across a 30-minute silence are skipped, and `cost` switches to measured weights only after 20 intervals with the cache read's 10th to 90th percentile range within ±25%.
+
+## Keep warm
+
+Off by default. With `keepWarm` on, when the thread is idle (no turn running, prompt box empty) and the cache has about 3 minutes left, the band sends `keep-warm: reply with only "ok"` as a plugin message, so the next prompt reads the context from the cache instead of writing it again. The band shows `cache ▬▬▬ 42m ♨2`: `♨` while keep-warm is armed, with the pings sent since your last prompt. While it is armed the cold pings stay quiet, since the cache does not go cold.
+
+- One ping costs a cache read of the whole context, about 0.05 of a cache write by the band's own fit (0.1 of uncached input at API prices), plus a few tokens of output. Letting it go cold costs re-writing the whole context at the next prompt: 1.25x (5-minute write) to 2x (1-hour write) of uncached input. On a 400k thread that is about 20k cache-write tokens per ping against 400k to rebuild, so up to about 20 pings cost what one cold rebuild does.
+- `keepWarmMaxIdle` stops it so an abandoned thread does not burn quota: `3` (the default) stops after three pings in a row with no prompt of yours, `2h` two hours after your last prompt. Any prompt you send starts the count again.
+- It stands down in overage, where the cache lives five minutes: a ping every four minutes costs more than the rebuild it saves.
+- A ping's turn is logged for the quota fit but does not replace the last turn's `cost`.
+
+```json
+"pluginConfigs": {
+  "quota-band@claude-quota-band": { "options": { "keepWarm": true, "keepWarmMaxIdle": "3" } }
+}
+```
 
 ## Phone pings
 

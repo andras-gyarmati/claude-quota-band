@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Limit, Multiplier, Turn } from '../types'
+import type { Limit, Multiplier, Turn, Warm } from '../types'
 
 const limits = atom({ plugin: 'quota-band', key: 'limits' } as const, [] as Limit[])
 const turn = atom({ plugin: 'quota-band', key: 'turn' } as const, null as Turn | null)
@@ -9,6 +9,7 @@ const multiplier = atom({ plugin: 'quota-band', key: 'multiplier' } as const, nu
 const tick = atom({ plugin: 'quota-band', key: 'tick' } as const, 0)
 const weekClaim = atom({ plugin: 'quota-band', key: 'weekClaim' } as const, null as number | null)
 const gift = atom({ plugin: 'quota-band', key: 'gift' } as const, null as Gift | null)
+const warm = atom({ plugin: 'quota-band', key: 'warm' } as const, null as Warm | null)
 
 const HOUR = 3600e3
 const FIVE_MINUTES = 5 * 60e3
@@ -83,6 +84,49 @@ async function sendIMessage($: any, to: string, text: string) {
   await $.process.run(['/usr/bin/osascript',
     '-e', 'on run argv', '-e', 'tell application "Messages" to send (item 2 of argv) to participant (item 1 of argv) of (1st account whose service type = iMessage)', '-e', 'end run',
     to, text]).catch(() => null)
+}
+
+/** How long before the cache goes cold a keep-warm ping is sent: a few cold
+ * checks of margin plus the ping's own turn. A guess. */
+export const WARM_LEAD_MS = 3 * 60e3
+export const KEEP_WARM_PROMPT = 'keep-warm: reply with only "ok"'
+
+/** `keepWarmMaxIdle`: `3` stops after three pings in a row with no prompt of
+ * his between them, `2h` after two hours without one. */
+export type WarmLimit = { pings: number } | { hours: number }
+
+export function parseMaxIdle(value: unknown): WarmLimit {
+  const text = String(value ?? '').trim().toLowerCase()
+  const hours = /^(\d+(?:\.\d+)?)\s*h$/.exec(text)
+  if (hours) return { hours: Number(hours[1]) }
+  const pings = Number(text)
+  return Number.isFinite(pings) && pings >= 0 && text !== '' ? { pings: Math.floor(pings) } : { pings: 3 }
+}
+
+export function warmSpent(w: Warm, limit: WarmLimit, now: number): boolean {
+  return 'pings' in limit ? w.sent >= limit.pings : now - w.idleSince >= limit.hours * HOUR
+}
+
+/** Keep-warm stands down in overage: a five-minute cache would need a ping
+ * every four minutes, which costs more than one cold rewrite saves. */
+export function warmArmed(ttlMs: number, w: Warm, limit: WarmLimit, now: number): boolean {
+  return ttlMs > FIVE_MINUTES && !warmSpent(w, limit, now)
+}
+
+export type WarmCheck = { now: number; last: Turn | null; running: boolean; draft: string; warm: Warm; limit: WarmLimit }
+
+/** Whether to send a keep-warm ping now, or why not. */
+export function keepWarmDue(c: WarmCheck): 'ping' | 'no-turn' | 'overage' | 'spent' | 'sent' | 'early' | 'cold' | 'busy' | 'typed' {
+  if (!c.last) return 'no-turn'
+  if (c.last.ttlMs <= FIVE_MINUTES) return 'overage'
+  if (warmSpent(c.warm, c.limit, c.now)) return 'spent'
+  if (c.warm.pingedFor === c.last.at) return 'sent'
+  const left = c.last.at + c.last.ttlMs - c.now
+  if (left <= 0) return 'cold'
+  if (left > WARM_LEAD_MS) return 'early'
+  if (c.running) return 'busy'
+  if (c.draft.trim() !== '') return 'typed'
+  return 'ping'
 }
 
 type Usage = {
@@ -418,7 +462,7 @@ function bar(limit: Limit, now: number, width: number, height: number, claimedAt
   return svg + `</svg>`
 }
 
-type Options = { iMessageTo?: string }
+type Options = { iMessageTo?: string; keepWarm?: boolean; keepWarmMaxIdle?: string }
 
 /** A plain filled bar for a share of 0 to 1. */
 function meter(share: number, color: string, width: number, height: number): string {
@@ -510,6 +554,11 @@ export const register: Register = (on, options: Options = {}) => {
   let observedTtl: number | null = null
   let baseline: { path: string; tokens: number } | null = null
   const calibration: Calibration = { own: null, fits: [], fittedAt: 0 }
+  const warmLimit = parseMaxIdle(options.keepWarmMaxIdle)
+  // Main-loop turns in flight, from turn.start to turn.complete. A reload mid-turn
+  // starts it empty; $.prompt.submit still waits for the session to be idle.
+  const running = new Set<string>()
+  let warmTurn = false
 
   on('command.run', { command: 'quota-weights' }, async $ => {
     await refit($, calibration)
@@ -526,11 +575,27 @@ export const register: Register = (on, options: Options = {}) => {
     if (usage.rateLimits.length > 0) await update($, limits, () => usage.rateLimits)
     const stored = (await $.store.get('week:' + await accountName($))) as WeekReading | undefined
     await update($, weekClaim, () => stored?.claimedAt ?? null)
+    if (options.keepWarm) {
+      const now = await $.clock.now()
+      await update($, warm, w => w ?? { sent: 0, idleSince: now, pingedFor: null })
+    }
     $.clock.every(60e3, () => { update($, tick, n => n + 1) })
     $.clock.every(COLD_CHECK_MS, () => {
       read($, turn).then(async last => {
         if (!last) return
-        const left = last.at + last.ttlMs - Date.now()
+        const now = Date.now()
+        const w = await read($, warm)
+        if (options.keepWarm && w) {
+          const draft = (await $.prompt.read()).text
+          if (keepWarmDue({ now, last, running: running.size > 0, draft, warm: w, limit: warmLimit }) === 'ping') {
+            await update($, warm, v => ({ ...(v ?? w), sent: (v ?? w).sent + 1, pingedFor: last.at }))
+            void $.prompt.submit({ text: KEEP_WARM_PROMPT })
+            return
+          }
+          // An armed keep-warm pings before the cache goes cold, so the cold pings would only be noise.
+          if (warmArmed(last.ttlMs, w, warmLimit, now)) return
+        }
+        const left = last.at + last.ttlMs - now
         const step = coldStep(left, last.ttlMs)
         if (step === null || step < 0) return
         if (pinged.at === last.at && pinged.step >= step) return
@@ -544,6 +609,25 @@ export const register: Register = (on, options: Options = {}) => {
       })
     })
     return result
+  })
+
+  on('turn.start', async ($, e, next) => {
+    running.add(e.turnId)
+    warmTurn = e.text.includes(KEEP_WARM_PROMPT)
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    try { return await next(e) } finally { running.delete(e.turnId) }
+  })
+
+  // Every prompt but this plugin's own pings (a hook never sees its plugin's own submit) restarts the idle count.
+  on('prompt.submit', async ($, e, next) => {
+    if (options.keepWarm && !e.agentId) {
+      const now = await $.clock.now()
+      await update($, warm, () => ({ sent: 0, idleSince: now, pingedFor: null }))
+    }
+    return next(e)
   })
 
   on('session.measure', async ($, e, next) => {
@@ -592,7 +676,7 @@ export const register: Register = (on, options: Options = {}) => {
     mine.log.updated = await $.clock.now()
     await saveLog($, mine)
     if (mine.log.updated - calibration.fittedAt >= REFIT_MS) await refit($, calibration)
-    if (baseline) {
+    if (baseline && !warmTurn) {
       const fit = calibration.fits[0] ?? null
       const weights = usable(fit) ? fit.weights : null
       const value = turnMultiplier(requests, baseline.tokens, weights)
@@ -607,6 +691,7 @@ export const register: Register = (on, options: Options = {}) => {
     const times = await read($, multiplier)
     const claimedAt = await read($, weekClaim)
     const lastGift = await read($, gift)
+    const w = await read($, warm)
     await read($, tick)
     const below = await next(e)
     if (e.props.hasSurvey || (shown.length === 0 && !last)) return below
@@ -617,11 +702,12 @@ export const register: Register = (on, options: Options = {}) => {
     const cache = left === null || !last ? null
       : left > 0 ? { text: `${Math.ceil(left / 60e3)}m`, share: left / last.ttlMs, color: left <= COLD_SOON ? '#ff8c00' : '#f5f5f7' }
       : { text: 'cold', share: 0, color: '#ff453a' }
+    const warmText = options.keepWarm && w && last && warmArmed(last.ttlMs, w, warmLimit, now) ? `♨${w.sent || ''}` : null
     const context = last?.tokens && last.window ? { share: last.tokens / last.window, percent: Math.round((last.tokens / last.window) * 100) } : null
     const line = shown.map(l => `${labels[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}%` + (l.resetsAt ? ` · ${resetText(l, now)}` : '')
       + (l.kind === 'seven_day' && lastGift ? ` · ${giftText(lastGift)}` : '')).join('   ')
       + (context ? `   ctx ${context.percent}% · ${tokensText(last!.tokens)}` : '')
-      + (cache ? `   cache ${cache.text}` : '')
+      + (cache ? `   cache ${cache.text}` + (warmText ? ` ${warmText}` : '') : '')
       + (times ? `   cost ×${times.value.toFixed(1)}${times.measured ? ' measured' : ''}` : '')
     // Wider than any terminal; the divider row clips it to the band's width.
     const divider = below ? <Box height={1} overflow="hidden"><Text dimColor>{'─'.repeat(400)}</Text></Box> : null
@@ -654,6 +740,7 @@ export const register: Register = (on, options: Options = {}) => {
             <Text dimColor>cache</Text>
             <Svg source={meter(cache.share, cache.color, 60, 8)} alt={`cache ${cache.text}`} width={60} height={8} />
             <Text color={cache.color === '#f5f5f7' ? undefined : cache.color}>{cache.text}</Text>
+            {warmText ? <Text dimColor>{warmText}</Text> : null}
           </Box>
         ) : null}
         {times ? (
