@@ -107,10 +107,37 @@ export function warmSpent(w: Warm, limit: WarmLimit, now: number): boolean {
   return 'pings' in limit ? w.sent >= limit.pings : now - w.idleSince >= limit.hours * HOUR
 }
 
+const pad = (n: number) => String(n).padStart(2, '0')
+
 /** Keep-warm stands down in overage: a five-minute cache would need a ping
  * every four minutes, which costs more than one cold rewrite saves. */
 export function warmArmed(ttlMs: number, w: Warm, limit: WarmLimit, now: number): boolean {
   return ttlMs > FIVE_MINUTES && !warmSpent(w, limit, now)
+}
+
+export const freshWarm = (now: number): Warm => ({ sent: 0, idleSince: now, pingedFor: null })
+
+const clock = (at: number) => { const d = new Date(at); return `${pad(d.getHours())}:${pad(d.getMinutes())}` }
+
+/** The band's keep-warm segment: off, the local time of the next ping, or why none is coming. */
+export function warmLabel(w: Warm | null, last: Turn | null, limit: WarmLimit, now: number): string {
+  if (!w) return 'keep-warm off'
+  const sent = w.sent ? ` · ${w.sent} sent` : ''
+  if (!last) return 'keep-warm on'
+  if (last.ttlMs <= FIVE_MINUTES) return 'keep-warm paused · overage'
+  if (warmSpent(w, limit, now)) return `keep-warm stopped · ${'pings' in limit ? `${w.sent} pings` : `${limit.hours}h`} without a prompt`
+  if (w.pingedFor === last.at) return `keep-warm pinging${sent}`
+  if (last.at + last.ttlMs <= now) return `keep-warm on · cache cold${sent}`
+  return `keep-warm ${clock(last.at + last.ttlMs - WARM_LEAD_MS)}${sent}`
+}
+
+/** `/keep-warm` with `on`, `off`, or nothing to flip it. */
+export function warmWanted(args: string, isOn: boolean): boolean | null {
+  const word = args.trim().toLowerCase()
+  if (word === '') return !isOn
+  if (word === 'on') return true
+  if (word === 'off') return false
+  return null
 }
 
 export type WarmCheck = { now: number; last: Turn | null; running: boolean; draft: string; warm: Warm; limit: WarmLimit }
@@ -348,7 +375,6 @@ const windowMs: Record<string, number> = { five_hour: 5 * 3600e3, seven_day: 7 *
 const labels: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'spend' }
 const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
-const pad = (n: number) => String(n).padStart(2, '0')
 
 function resetText(limit: Limit, now: number): string {
   if (!limit.resetsAt) return ''
@@ -462,7 +488,7 @@ function bar(limit: Limit, now: number, width: number, height: number, claimedAt
   return svg + `</svg>`
 }
 
-type Options = { iMessageTo?: string; keepWarm?: boolean; keepWarmMaxIdle?: string }
+type Options = { iMessageTo?: string; keepWarmMaxIdle?: string }
 
 /** A plain filled bar for a share of 0 to 1. */
 function meter(share: number, color: string, width: number, height: number): string {
@@ -541,6 +567,17 @@ async function saveLog($: any, mine: { key: string; log: Log }) {
   $.ui.toast('quota-band: calibration log not saved')
 }
 
+/** Keep-warm is per thread: the session ids it is on for, in the store so a restart keeps them. */
+const WARM_PREFIX = 'keep-warm/'
+
+async function setKeepWarm($: any, on: boolean) {
+  const key = WARM_PREFIX + await $.session.id()
+  const now = await $.clock.now()
+  if (on) await $.store.set(key, { since: now })
+  else await $.store.delete(key)
+  await update($, warm, () => (on ? freshWarm(now) : null))
+}
+
 async function refit($: any, c: Calibration) {
   const all = (await calibrationLogs($)).map(l => (l.key === c.own?.key ? c.own.log : l.log))
   if (c.own && !all.includes(c.own.log)) all.push(c.own.log)
@@ -566,26 +603,34 @@ export const register: Register = (on, options: Options = {}) => {
     return { text: [...calibration.fits.map(fitText), `output stays at ${OUTPUT_PER_WRITE} cache writes per token`, `cost × uses ${used}`].join('\n') }
   })
 
+  on('command.run', { command: 'keep-warm' }, async ($, e) => {
+    const wanted = warmWanted(e.args, (await read($, warm)) !== null)
+    if (wanted === null) return { text: 'Usage: /keep-warm [on|off]' }
+    await setKeepWarm($, wanted)
+    return { text: wanted ? 'keep-warm on for this thread' : 'keep-warm off for this thread' }
+  })
+
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     await $.command.register({ name: 'quota-weights', description: 'How much of the 5h and 7d quota cache reads and output use, measured against cache writes' })
+    await $.command.register({ name: 'keep-warm', description: 'Ping this thread before its prompt cache goes cold', argumentHint: '[on|off]', immediate: true })
     await ownLog($, calibration)
     await refit($, calibration)
     const usage = await $.session.usage()
     if (usage.rateLimits.length > 0) await update($, limits, () => usage.rateLimits)
     const stored = (await $.store.get('week:' + await accountName($))) as WeekReading | undefined
     await update($, weekClaim, () => stored?.claimedAt ?? null)
-    if (options.keepWarm) {
+    if (await $.store.get(WARM_PREFIX + await $.session.id())) {
       const now = await $.clock.now()
-      await update($, warm, w => w ?? { sent: 0, idleSince: now, pingedFor: null })
-    }
+      await update($, warm, w => w ?? freshWarm(now))
+    } else await update($, warm, () => null)
     $.clock.every(60e3, () => { update($, tick, n => n + 1) })
     $.clock.every(COLD_CHECK_MS, () => {
       read($, turn).then(async last => {
         if (!last) return
         const now = Date.now()
         const w = await read($, warm)
-        if (options.keepWarm && w) {
+        if (w) {
           const draft = (await $.prompt.read()).text
           if (keepWarmDue({ now, last, running: running.size > 0, draft, warm: w, limit: warmLimit }) === 'ping') {
             await update($, warm, v => ({ ...(v ?? w), sent: (v ?? w).sent + 1, pingedFor: last.at }))
@@ -623,9 +668,9 @@ export const register: Register = (on, options: Options = {}) => {
 
   // Every prompt but this plugin's own pings (a hook never sees its plugin's own submit) restarts the idle count.
   on('prompt.submit', async ($, e, next) => {
-    if (options.keepWarm && !e.agentId) {
+    if (!e.agentId && (await read($, warm))) {
       const now = await $.clock.now()
-      await update($, warm, () => ({ sent: 0, idleSince: now, pingedFor: null }))
+      await update($, warm, w => (w ? freshWarm(now) : w))
     }
     return next(e)
   })
@@ -697,17 +742,18 @@ export const register: Register = (on, options: Options = {}) => {
     if (e.props.hasSurvey || (shown.length === 0 && !last)) return below
     const now = await $.clock.now()
     const ui = $.ui.resolve(e)
-    const { Box, Text } = ui
+    const { Box, Text, Button } = ui
     const left = last ? last.at + last.ttlMs - now : null
     const cache = left === null || !last ? null
       : left > 0 ? { text: `${Math.ceil(left / 60e3)}m`, share: left / last.ttlMs, color: left <= COLD_SOON ? '#ff8c00' : '#f5f5f7' }
       : { text: 'cold', share: 0, color: '#ff453a' }
-    const warmText = options.keepWarm && w && last && warmArmed(last.ttlMs, w, warmLimit, now) ? `♨${w.sent || ''}` : null
+    const warmText = warmLabel(w, last, warmLimit, now)
     const context = last?.tokens && last.window ? { share: last.tokens / last.window, percent: Math.round((last.tokens / last.window) * 100) } : null
     const line = shown.map(l => `${labels[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}%` + (l.resetsAt ? ` · ${resetText(l, now)}` : '')
       + (l.kind === 'seven_day' && lastGift ? ` · ${giftText(lastGift)}` : '')).join('   ')
       + (context ? `   ctx ${context.percent}% · ${tokensText(last!.tokens)}` : '')
-      + (cache ? `   cache ${cache.text}` + (warmText ? ` ${warmText}` : '') : '')
+      + (cache ? `   cache ${cache.text}` : '')
+      + `   ${warmText}`
       + (times ? `   cost ×${times.value.toFixed(1)}${times.measured ? ' measured' : ''}` : '')
     // Wider than any terminal; the divider row clips it to the band's width.
     const divider = below ? <Box height={1} overflow="hidden"><Text dimColor>{'─'.repeat(400)}</Text></Box> : null
@@ -740,9 +786,9 @@ export const register: Register = (on, options: Options = {}) => {
             <Text dimColor>cache</Text>
             <Svg source={meter(cache.share, cache.color, 60, 8)} alt={`cache ${cache.text}`} width={60} height={8} />
             <Text color={cache.color === '#f5f5f7' ? undefined : cache.color}>{cache.text}</Text>
-            {warmText ? <Text dimColor>{warmText}</Text> : null}
           </Box>
         ) : null}
+        <Button key="keep-warm" label={warmText} dimColor={w === null} onPress={() => setKeepWarm($, w === null)} />
         {times ? (
           <Box flexDirection="row" alignItems="center" columnGap={1}>
             <Text dimColor>cost</Text>

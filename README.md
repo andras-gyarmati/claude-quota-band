@@ -3,7 +3,7 @@
 A Claude Code mod that keeps your plan's usage in view: one line above the prompt with the 5-hour and weekly windows, the context window, the prompt cache's time left and what the context adds to each turn's cost.
 
 ```
-5h ▬▬▬▬▬▬▬▬▬ 93% → 100% 23:10    7d ▬▬▬▬▬▬▬ 72% 11:00    ctx ▬▬▬ 37% 370k    cache ▬▬▬ 42m    cost ×4.5
+5h ▬▬▬▬▬▬▬▬▬ 93% → 100% 23:10    7d ▬▬▬▬▬▬▬ 72% 11:00    ctx ▬▬▬ 37% 370k    cache ▬▬▬ 42m    keep-warm off    cost ×4.5
 ```
 
 - Each bar fills with the percent used. A grey tick marks how much of the window has passed, and the notches are hours (5h) or days (7d).
@@ -14,7 +14,7 @@ A Claude Code mod that keeps your plan's usage in view: one line above the promp
 - The time is when the window resets.
 - `ctx` is how full the context window is; `370k` is what the next request re-sends, which a cold cache has to write again.
 - `cache` drains over the time the prompt cache stays warm after the last response: the length the last response actually wrote, read from the transcript at the end of each turn, so it drops to five minutes in overage. Until the first turn ends (and on Windows, which has no `tail`) it assumes an hour on a subscription's main thread, five minutes otherwise, or what `promptCacheTtl` sets. It turns orange in the last five minutes and red once cold. When 50%, 25%, 10% and 5% of the lifetime is left, every thread pings with a toast and, on macOS, a Notification Centre banner titled with the thread's name (`osascript`, so the banner comes from Script Editor, which macOS may ask to allow once). Set `iMessageTo` (below) to a phone number or Apple ID to get the same pings on the phone, sent through this Mac's Messages app; macOS asks once to let Claude control Messages.
-- `♨2` after the cache time: keep-warm is on and has pinged twice (below).
+- `keep-warm` says whether this thread is kept warm and when the next ping goes out (below). On the desktop app it is a button that turns it on or off.
 - `cost ×4.5` is what the last turn cost over the same turn in a fresh thread. Every request in a turn (one per tool call) resends the context, so a long thread costs more per message even with a warm cache. The fresh thread starts from what the session's first request sent (system prompt, tools, rules). Token kinds are weighed at API price ratios: cache read 0.1, cache write 1.25 (5 minutes) or 2 (1 hour), output 5, against uncached input 1. How the plan's quotas weigh them is not published, so treat it as an estimate.
 - Once the plan's own readings have measured the weights (below), `cost` uses those and says `measured`.
 
@@ -33,7 +33,17 @@ The readings cover the whole account, so usage the log cannot see (claude.ai, an
 
 ## Keep warm
 
-Off by default. With `keepWarm` on, when the thread is idle (no turn running, prompt box empty) and the cache has about 3 minutes left, the band sends `keep-warm: reply with only "ok"` as a plugin message, so the next prompt reads the context from the cache instead of writing it again. The band shows `cache ▬▬▬ 42m ♨2`: `♨` while keep-warm is armed, with the pings sent since your last prompt. While it is armed the cold pings stay quiet, since the cache does not go cold.
+Off for every thread until you turn it on for one with `/keep-warm` (or `/keep-warm on`, `/keep-warm off`; bare flips it), or by clicking `keep-warm off` in the band on the desktop app. The setting is kept per thread in the plugin's store, so it survives a restart of the app. While it is on and the thread is idle (no turn running, prompt box empty) with about 3 minutes of cache left, the band sends `keep-warm: reply with only "ok"` as a plugin message, so the next prompt reads the context from the cache instead of writing it again. While it is on the cold pings stay quiet, since the cache does not go cold.
+
+The band's segment, one state at a time:
+
+- `keep-warm off`: not on for this thread.
+- `keep-warm 13:47 · 2 sent`: the local time of the next ping, and the pings since your last prompt. A time already past means the ping waits for the turn to end or the prompt box to empty.
+- `keep-warm pinging`: a ping was sent and its turn has not ended yet.
+- `keep-warm stopped · 3 pings without a prompt` (or `· 2h without a prompt`): `keepWarmMaxIdle` was reached; your next prompt starts it again.
+- `keep-warm paused · overage`: the cache lives five minutes, so no pings (below).
+- `keep-warm on · cache cold`: the cache went cold before a ping could go out (you were typing, or a turn ran); the next response arms it again.
+- `keep-warm on`: no response yet in this session to time from.
 
 - One ping costs a cache read of the whole context, about 0.05 of a cache write by the band's own fit (0.1 of uncached input at API prices), plus a few tokens of output. Letting it go cold costs re-writing the whole context at the next prompt: 1.25x (5-minute write) to 2x (1-hour write) of uncached input. On a 400k thread that is about 20k cache-write tokens per ping against 400k to rebuild, so up to about 20 pings cost what one cold rebuild does.
 - `keepWarmMaxIdle` stops it so an abandoned thread does not burn quota: `3` (the default) stops after three pings in a row with no prompt of yours, `2h` two hours after your last prompt. Any prompt you send starts the count again.
@@ -42,7 +52,7 @@ Off by default. With `keepWarm` on, when the thread is idle (no turn running, pr
 
 ```json
 "pluginConfigs": {
-  "quota-band@claude-quota-band": { "options": { "keepWarm": true, "keepWarmMaxIdle": "3" } }
+  "quota-band@claude-quota-band": { "options": { "keepWarmMaxIdle": "3" } }
 }
 ```
 

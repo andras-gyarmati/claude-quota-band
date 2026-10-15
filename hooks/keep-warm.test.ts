@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { keepWarmDue, parseMaxIdle, warmArmed, WARM_LEAD_MS } from './register'
+import { keepWarmDue, parseMaxIdle, warmArmed, warmLabel, warmWanted, WARM_LEAD_MS } from './register'
 
 const HOUR = 3600e3
 const at = 1_000_000
@@ -46,4 +46,27 @@ test('reads the max idle option', () => {
   expect(parseMaxIdle('1.5 h')).toEqual({ hours: 1.5 })
   expect(parseMaxIdle('')).toEqual({ pings: 3 })
   expect(parseMaxIdle('junk')).toEqual({ pings: 3 })
+})
+
+test('is toggled per thread by /keep-warm', () => {
+  expect(warmWanted('', false)).toBe(true)
+  expect(warmWanted('', true)).toBe(false)
+  expect(warmWanted(' ON ', false)).toBe(true)
+  expect(warmWanted('off', true)).toBe(false)
+  expect(warmWanted('maybe', true)).toBe(null)
+})
+
+test('the band names each keep-warm state', () => {
+  const next = new Date(at + HOUR - WARM_LEAD_MS)
+  const time = `${String(next.getHours()).padStart(2, '0')}:${String(next.getMinutes()).padStart(2, '0')}`
+  const pings = { pings: 3 }
+  expect(warmLabel(null, hourTurn, pings, at)).toBe('keep-warm off')
+  expect(warmLabel(fresh, null, pings, at)).toBe('keep-warm on')
+  expect(warmLabel(fresh, hourTurn, pings, at + 60e3)).toBe(`keep-warm ${time}`)
+  expect(warmLabel({ ...fresh, sent: 2 }, hourTurn, pings, at + 60e3)).toBe(`keep-warm ${time} · 2 sent`)
+  expect(warmLabel({ ...fresh, sent: 1, pingedFor: at }, hourTurn, pings, due)).toBe('keep-warm pinging · 1 sent')
+  expect(warmLabel({ ...fresh, sent: 3 }, hourTurn, pings, at + 60e3)).toBe('keep-warm stopped · 3 pings without a prompt')
+  expect(warmLabel(fresh, hourTurn, { hours: 2 }, at + 2 * HOUR)).toBe('keep-warm stopped · 2h without a prompt')
+  expect(warmLabel(fresh, { ...hourTurn, ttlMs: 5 * 60e3 }, pings, at)).toBe('keep-warm paused · overage')
+  expect(warmLabel(fresh, hourTurn, pings, at + HOUR)).toBe('keep-warm on · cache cold')
 })
