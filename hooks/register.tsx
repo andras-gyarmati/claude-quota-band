@@ -62,6 +62,13 @@ function threadTitle(lines: string[]): string | null {
   return null
 }
 
+/** A title tagged `[x]`, `[r]` or `[p]` marks a closed or parked thread: close-thread
+ * retags it, so keep-warm stops there instead of pinging a thread nobody returns to
+ * within the hour (Andras, 2026-10-26). */
+export function closedTitle(title: string | null): boolean {
+  return title !== null && /^\s*\[(x|r|p)\]/i.test(title)
+}
+
 /** The coldest step `left` of `ttlMs` has passed, as an index into
  * `COLD_STEPS`; -1 above the first, null once cold. */
 export function coldStep(left: number, ttlMs: number): number | null {
@@ -596,6 +603,7 @@ export const register: Register = (on, options: Options = {}) => {
   // starts it empty; $.prompt.submit still waits for the session to be idle.
   const running = new Set<string>()
   let warmTurn = false
+  let transcript: string | null = null
 
   on('command.run', { command: 'quota-weights' }, async $ => {
     await refit($, calibration)
@@ -630,6 +638,11 @@ export const register: Register = (on, options: Options = {}) => {
         if (!last) return
         const now = Date.now()
         const w = await read($, warm)
+        if (w && transcript) {
+          // The Stop hook can be skipped by another plugin, so the title is read again here.
+          title = threadTitle((await transcriptEnd($, 'tail', transcript)) ?? []) ?? title
+          if (closedTitle(title)) return setKeepWarm($, false)
+        }
         if (w) {
           const draft = (await $.prompt.read()).text
           if (keepWarmDue({ now, last, running: running.size > 0, draft, warm: w, limit: warmLimit }) === 'ping') {
@@ -703,7 +716,9 @@ export const register: Register = (on, options: Options = {}) => {
     if (!path) return result
     const tail = await transcriptEnd($, 'tail', path)
     if (!tail) return result
+    transcript = path
     title = threadTitle(tail) ?? title
+    if (closedTitle(title) && (await read($, warm))) await setKeepWarm($, false)
     const ttlMs = writtenTtl(tail)
     if (ttlMs !== null) {
       observedTtl = ttlMs

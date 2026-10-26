@@ -37,7 +37,7 @@ Off for every thread until you turn it on for one with `/keep-warm` (or `/keep-w
 
 The band's segment, one state at a time:
 
-- `keep-warm off`: not on for this thread.
+- `keep-warm off`: not on for this thread, or turned off because the thread's title was tagged `[x]`, `[r]` or `[p]` (closed or parked, as close-thread does).
 - `keep-warm 13:47 · 2 sent`: the local time of the next ping, and the pings since your last prompt. A time already past means the ping waits for the turn to end or the prompt box to empty.
 - `keep-warm pinging`: a ping was sent and its turn has not ended yet.
 - `keep-warm stopped · 3 pings without a prompt` (or `· 2h without a prompt`): `keepWarmMaxIdle` was reached; your next prompt starts it again.

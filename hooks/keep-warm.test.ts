@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { keepWarmDue, parseMaxIdle, warmArmed, warmLabel, warmWanted, WARM_LEAD_MS } from './register'
+import { closedTitle, keepWarmDue, parseMaxIdle, warmArmed, warmLabel, warmWanted, WARM_LEAD_MS } from './register'
 
 const HOUR = 3600e3
 const at = 1_000_000
@@ -69,4 +69,14 @@ test('the band names each keep-warm state', () => {
   expect(warmLabel(fresh, hourTurn, { hours: 2 }, at + 2 * HOUR)).toBe('keep-warm stopped · 2h without a prompt')
   expect(warmLabel(fresh, { ...hourTurn, ttlMs: 5 * 60e3 }, pings, at)).toBe('keep-warm paused · overage')
   expect(warmLabel(fresh, hourTurn, pings, at + HOUR)).toBe('keep-warm on · cache cold')
+})
+
+test('a closed or parked title stops keep-warm', () => {
+  expect(closedTitle('[x] swo daily 2026-10-26')).toBe(true)
+  expect(closedTitle('[r] old thread')).toBe(true)
+  expect(closedTitle('[p] parked')).toBe(true)
+  expect(closedTitle('[?] waiting on Andras')).toBe(false)
+  expect(closedTitle('[w] working')).toBe(false)
+  expect(closedTitle('no tag')).toBe(false)
+  expect(closedTitle(null)).toBe(false)
 })
