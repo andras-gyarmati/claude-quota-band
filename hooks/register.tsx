@@ -78,19 +78,17 @@ export function coldStep(left: number, ttlMs: number): number | null {
   return step
 }
 
-/** A Notification Centre banner, so a ping reaches him outside the thread. The
- * text goes in as arguments, never into the script. macOS only. */
-async function notify($: any, title: string, text: string) {
-  await $.process.run(['/usr/bin/osascript',
-    '-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)', '-e', 'end run',
-    title, text]).catch(() => null)
-}
-
-/** An iMessage from this Mac's Messages account, which reaches the phone. */
-async function sendIMessage($: any, to: string, text: string) {
-  await $.process.run(['/usr/bin/osascript',
-    '-e', 'on run argv', '-e', 'tell application "Messages" to send (item 2 of argv) to participant (item 1 of argv) of (1st account whose service type = iMessage)', '-e', 'end run',
-    to, text]).catch(() => null)
+/** A cold-cache ping on the phone through ntfy, the one channel Andras chose on
+ * 2026-10-27 in place of a Notification Centre banner plus an iMessage. The
+ * topic is agent-runner's, so every agent message lands in one feed. */
+export const NTFY_TOPIC_FILE = '.config/agent-runner/ntfy-topic'
+async function notify($: any, title: string, text: string, coldest: boolean) {
+  const home = await $.env.get('HOME')
+  const path = `${home}/${NTFY_TOPIC_FILE}`
+  if (!home || !(await $.fs.exists(path))) return
+  const topic = (await $.fs.read(path)).trim()
+  const query = new URLSearchParams({ title, tags: coldest ? 'snowflake' : 'thermometer', priority: coldest ? 'default' : 'low' })
+  await $.process.run(['/usr/bin/curl', '-s', '-m', '20', '--data-binary', text, `https://ntfy.sh/${topic}?${query}`]).catch(() => null)
 }
 
 /** How long before the cache goes cold a keep-warm ping is sent: a few cold
@@ -495,7 +493,7 @@ function bar(limit: Limit, now: number, width: number, height: number, claimedAt
   return svg + `</svg>`
 }
 
-type Options = { iMessageTo?: string; keepWarmMaxIdle?: string }
+type Options = { keepWarmMaxIdle?: string }
 
 /** A plain filled bar for a share of 0 to 1. */
 function meter(share: number, color: string, width: number, height: number): string {
@@ -638,10 +636,11 @@ export const register: Register = (on, options: Options = {}) => {
         if (!last) return
         const now = Date.now()
         const w = await read($, warm)
-        if (w && transcript) {
+        if (transcript) {
           // The Stop hook can be skipped by another plugin, so the title is read again here.
           title = threadTitle((await transcriptEnd($, 'tail', transcript)) ?? []) ?? title
-          if (closedTitle(title)) return setKeepWarm($, false)
+          // A closed thread gets neither keep-warm nor cold pings (Andras, 2026-10-27).
+          if (closedTitle(title)) return w ? setKeepWarm($, false) : undefined
         }
         if (w) {
           const draft = (await $.prompt.read()).text
@@ -662,8 +661,7 @@ export const register: Register = (on, options: Options = {}) => {
         const text = `Prompt cache ${COLD_STEPS[step] * 100}% warm · cold in ${minutes} · ${tokensText(last.tokens)} to rebuild`
         $.ui.toast(text, { timeoutMs: 10e3 })
         const folder = (await $.session.cwd().catch(() => '')).split('/').pop()
-        await notify($, title ?? folder ?? 'Claude', text)
-        if (options.iMessageTo) await sendIMessage($, String(options.iMessageTo), `${title ?? folder ?? 'Claude'}: ${text}`)
+        await notify($, title ?? folder ?? 'Claude', `cold in ${minutes} · ${tokensText(last.tokens)} to rebuild`, step === COLD_STEPS.length - 1)
       })
     })
     return result

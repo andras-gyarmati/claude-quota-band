@@ -58,17 +58,11 @@ The band's segment, one state at a time:
 
 ## Phone pings
 
-The cache pings can also go to your phone as an iMessage from this Mac. Set `iMessageTo` in `/config` under the plugin's options, or in `settings.json`:
-
-```json
-"pluginConfigs": {
-  "quota-band@claude-quota-band": { "options": { "iMessageTo": "" } }
-}
-```
+The cache pings also go to your phone through [ntfy](https://ntfy.sh) when `~/.config/agent-runner/ntfy-topic` holds a topic name (the file agent-runner uses, so both land in one feed). Threads whose title starts with `[x]`, `[r]` or `[p]` get no pings.
 
 The close and rename buttons moved to [prompt-buttons](https://github.com/andras-gyarmati/claude-prompt-buttons).
 
-It reads the figures Claude Code already receives with each response (`session.measure`), and the ends of the session's transcript at the end of each turn, so it sends no requests of its own. It writes to its own plugin store and, where the Agent Profiles Mac app is installed, the latest figures per account to `~/Library/Application Support/Agent Profiles/mod-readings/`, which that app shows instead of asking Anthropic. The figures appear after the first response of a session, on Pro, Max and Team plans.
+It reads the figures Claude Code already receives with each response (`session.measure`), and the ends of the session's transcript at the end of each turn; its only request is the ntfy ping. It writes to its own plugin store and, where the Agent Profiles Mac app is installed, the latest figures per account to `~/Library/Application Support/Agent Profiles/mod-readings/`, which that app shows instead of asking Anthropic. The figures appear after the first response of a session, on Pro, Max and Team plans.
 
 ## Install
 
