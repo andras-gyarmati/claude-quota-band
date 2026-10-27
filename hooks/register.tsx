@@ -62,6 +62,21 @@ function threadTitle(lines: string[]): string | null {
   return null
 }
 
+/** Claude's file name for a session's transcript folder: every character but a
+ * letter or digit becomes `-` (`/Users/a/repos` → `-Users-a-repos`). */
+export function projectFolder(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-')
+}
+
+/** The session's own transcript, for a thread whose turn ends this mod never saw
+ * (it was idle since the mod loaded, or another plugin skipped Stop): its cache
+ * pings then named only the folder (2026-10-27, "personal"). */
+async function ownTranscript($: any): Promise<string | null> {
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${await $.env.get('HOME')}/.claude`
+  const path = `${config}/projects/${projectFolder(await $.session.cwd())}/${await $.session.id()}.jsonl`
+  return (await $.fs.exists(path)) ? path : null
+}
+
 /** A title tagged `[x]`, `[r]` or `[p]` marks a closed or parked thread: close-thread
  * retags it, so keep-warm stops there instead of pinging a thread nobody returns to
  * within the hour (Andras, 2026-10-26). */
@@ -636,6 +651,7 @@ export const register: Register = (on, options: Options = {}) => {
         if (!last) return
         const now = Date.now()
         const w = await read($, warm)
+        transcript = transcript ?? await ownTranscript($)
         if (transcript) {
           // The Stop hook can be skipped by another plugin, so the title is read again here.
           title = threadTitle((await transcriptEnd($, 'tail', transcript)) ?? []) ?? title

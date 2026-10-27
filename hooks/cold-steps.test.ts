@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { coldStep } from './register'
+import { coldStep, projectFolder } from './register'
 
 const HOUR = 3600e3
 
@@ -19,4 +19,9 @@ test('a check that wakes late lands on the coldest step passed', () => {
 test('no ping once the cache is cold', () => {
   expect(coldStep(0, HOUR)).toBeNull()
   expect(coldStep(-1, HOUR)).toBeNull()
+})
+
+test('a transcript folder is the cwd with every non-alphanumeric as a dash', () => {
+  expect(projectFolder('/Users/andrasgyarmati/repos/personal')).toBe('-Users-andrasgyarmati-repos-personal')
+  expect(projectFolder('/Users/a/my.app_x')).toBe('-Users-a-my-app-x')
 })
