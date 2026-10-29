@@ -10,6 +10,9 @@ const tick = atom({ plugin: 'quota-band', key: 'tick' } as const, 0)
 const weekClaim = atom({ plugin: 'quota-band', key: 'weekClaim' } as const, null as number | null)
 const gift = atom({ plugin: 'quota-band', key: 'gift' } as const, null as Gift | null)
 const warm = atom({ plugin: 'quota-band', key: 'warm' } as const, null as Warm | null)
+/** This session's newest requests as [unix s, tokens written or sent uncached, cache read]. */
+const history = atom({ plugin: 'quota-band', key: 'history' } as const, [] as number[][])
+const historyOpen = atom({ plugin: 'quota-band', key: 'historyOpen' } as const, false)
 
 const HOUR = 3600e3
 const FIVE_MINUTES = 5 * 60e3
@@ -511,6 +514,43 @@ function bar(limit: Limit, now: number, width: number, height: number, claimedAt
 type Options = { keepWarmMaxIdle?: string }
 
 /** A plain filled bar for a share of 0 to 1. */
+/** Requests the cache chart shows, about two pixels each at its width. */
+const HISTORY_BARS = 200
+/** Guess: a request that wrote more than it read, and at least this much, rebuilt
+ * a cold cache rather than adding one turn's new text. */
+const REBUILD_MIN = 20e3
+
+export const rebuilt = (written: number, read: number) => written >= REBUILD_MIN && written > read
+
+export const historyRows = (log: Log): number[][] => log.requests.slice(-HISTORY_BARS).map(r => [r[0], r[1], r[2]])
+
+/** One bar per request, oldest left: cache read grey under what was written,
+ * orange, or red where the request rebuilt a cold cache. */
+export function cacheChart(rows: number[][], width: number, height: number): string {
+  const top = Math.max(1, ...rows.map(r => r[1] + r[2]))
+  const step = width / Math.max(rows.length, 1)
+  const barWidth = Math.max(step >= 3 ? step - 1 : step, 1).toFixed(1)
+  const bars = rows.map(([, written, read], i) => {
+    const x = (i * step).toFixed(1)
+    const readHeight = (read / top) * height
+    const writtenHeight = Math.max((written / top) * height, written > 0 ? 1 : 0)
+    return `<rect x="${x}" y="${(height - readHeight).toFixed(1)}" width="${barWidth}" height="${readHeight.toFixed(1)}" fill="#f5f5f7" fill-opacity="0.45"/>`
+      + `<rect x="${x}" y="${(height - readHeight - writtenHeight).toFixed(1)}" width="${barWidth}" height="${writtenHeight.toFixed(1)}" fill="${rebuilt(written, read) ? '#ff453a' : '#ff8c00'}"/>`
+  }).join('')
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
+    + `<rect width="${width}" height="${height}" rx="2" fill="#000" fill-opacity="0.4"/>${bars}</svg>`
+}
+
+export function historySummary(rows: number[][]) {
+  return {
+    written: rows.reduce((sum, r) => sum + r[1], 0),
+    read: rows.reduce((sum, r) => sum + r[2], 0),
+    rebuilds: rows.filter(r => rebuilt(r[1], r[2])).length,
+    from: rows.length ? rows[0][0] * 1e3 : null,
+    to: rows.length ? rows[rows.length - 1][0] * 1e3 : null,
+  }
+}
+
 function meter(share: number, color: string, width: number, height: number): string {
   const fill = (Math.min(Math.max(share, 0), 1) * width).toFixed(1)
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
@@ -635,7 +675,8 @@ export const register: Register = (on, options: Options = {}) => {
     const result = await next(e)
     await $.command.register({ name: 'quota-weights', description: 'How much of the 5h and 7d quota cache reads and output use, measured against cache writes' })
     await $.command.register({ name: 'keep-warm', description: 'Ping this thread before its prompt cache goes cold', argumentHint: '[on|off]', immediate: true })
-    await ownLog($, calibration)
+    const mine = await ownLog($, calibration)
+    await update($, history, () => historyRows(mine.log))
     await refit($, calibration)
     const usage = await $.session.usage()
     if (usage.rateLimits.length > 0) await update($, limits, () => usage.rateLimits)
@@ -749,6 +790,7 @@ export const register: Register = (on, options: Options = {}) => {
     mine.log.requests.push(...requests.map(requestRow).filter(r => r[0] > loggedUntil).reverse())
     mine.log.updated = await $.clock.now()
     await saveLog($, mine)
+    await update($, history, () => historyRows(mine.log))
     if (mine.log.updated - calibration.fittedAt >= REFIT_MS) await refit($, calibration)
     if (baseline && !warmTurn) {
       const fit = calibration.fits[0] ?? null
@@ -766,6 +808,8 @@ export const register: Register = (on, options: Options = {}) => {
     const claimedAt = await read($, weekClaim)
     const lastGift = await read($, gift)
     const w = await read($, warm)
+    const rows = await read($, history)
+    const open = await read($, historyOpen)
     await read($, tick)
     const below = await next(e)
     if (e.props.hasSurvey || (shown.length === 0 && !last)) return below
@@ -788,6 +832,7 @@ export const register: Register = (on, options: Options = {}) => {
     const divider = below ? <Box height={1} overflow="hidden"><Text dimColor>{'─'.repeat(400)}</Text></Box> : null
     if (e.surface !== 'desktop' || !('Svg' in ui)) return <Box flexDirection="column"><Text dimColor>{line}</Text>{divider}{below}</Box>
     const { Svg } = ui as any
+    const past = open && rows.length > 0 ? historySummary(rows) : null
 
     return (
       <Box flexDirection="column">
@@ -812,7 +857,7 @@ export const register: Register = (on, options: Options = {}) => {
         ) : null}
         {cache ? (
           <Box flexDirection="row" alignItems="center" columnGap={1}>
-            <Text dimColor>cache</Text>
+            <Button key="cache" label="cache" dimColor={!open} onPress={() => update($, historyOpen, o => !o)} />
             <Svg source={meter(cache.share, cache.color, 60, 8)} alt={`cache ${cache.text}`} width={60} height={8} />
             <Text color={cache.color === '#f5f5f7' ? undefined : cache.color}>{cache.text}</Text>
           </Box>
@@ -826,6 +871,18 @@ export const register: Register = (on, options: Options = {}) => {
           </Box>
         ) : null}
       </Box>
+      {past ? (
+        <Box flexDirection="row" alignItems="center" columnGap={1}>
+          <Svg source={cacheChart(rows, 400, 32)} alt={`cache history, ${rows.length} requests`} width={400} height={32} />
+          <Text dimColor>{clock(past.from!)}–{clock(past.to!)}</Text>
+          <Text dimColor>read</Text>
+          <Text>{tokensText(past.read)}</Text>
+          <Text color="#ff8c00">written</Text>
+          <Text>{tokensText(past.written)}</Text>
+          <Text color="#ff453a">rebuilds</Text>
+          <Text>{past.rebuilds}</Text>
+        </Box>
+      ) : null}
       {divider}
       {below}
       </Box>
